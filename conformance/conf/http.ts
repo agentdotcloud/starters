@@ -55,6 +55,7 @@ export function cookieAttrs(line: string) {
   const expires = attrs.has('expires') ? (Date.parse(attrs.get('expires')!) - Date.now()) / 1000 : null;
   return {
     name, value, httpOnly: attrs.has('httponly'), secure: attrs.has('secure'), sameSite: (attrs.get('samesite') ?? '').toLowerCase(),
+    path: attrs.get('path') ?? null, domain: attrs.get('domain') ?? null,
     lifetime: maxAge ?? expires, // seconds, or null for a session cookie
   };
 }

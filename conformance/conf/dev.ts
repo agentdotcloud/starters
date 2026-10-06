@@ -94,18 +94,24 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
     const started = await until(120_000, async () => ((await env.logs(w)).some((l) => l.includes(r.find)) ? true : undefined), 500);
     if (!started) out.set('CONF:reload-worker', fail(`the dev worker never logged "${r.find}"`));
     else {
-      const t0 = await edit(w, r);
-      const seen = await until(15_000, async () => ((await env.logs(w)).some((l) => l.includes(r.expect)) ? Date.now() : undefined), 200);
-      out.set('CONF:reload-worker', seen && seen - t0 <= BUDGET_MS ? pass(`the worker restarted ${((seen - t0) / 1000).toFixed(1)} s after the save`)
-        : fail(seen ? `the worker took ${((seen - t0) / 1000).toFixed(1)} s to restart (budget 5 s)` : `no "${r.expect}" in the worker’s log 15 s after the save`));
+      // A warm-up save, untimed; then the timed one puts the file back, and the worker logs `find` again.
+      await edit(w, r.file, r.find, r.replace);
+      const warm = await until(60_000, async () => ((await env.logs(w)).some((l) => l.includes(r.expect)) ? true : undefined), 250);
+      const count = async () => (await env.logs(w)).filter((l) => l.includes(r.find)).length;
+      const n = await count();
+      const t0 = await edit(w, r.file, r.replace, r.find);
+      const seen = warm ? await until(15_000, async () => ((await count()) > n ? Date.now() : undefined), 200) : undefined;
+      out.set('CONF:reload-worker', !warm ? fail(`no "${r.expect}" in the worker’s log within 60 s of the first save`)
+        : seen && seen - t0 <= BUDGET_MS ? pass(`the worker restarted ${((seen - t0) / 1000).toFixed(1)} s after the save`)
+          : fail(seen ? `the worker took ${((seen - t0) / 1000).toFixed(1)} s to restart (budget 5 s)` : 'the worker didn’t restart within 15 s of the second save'));
     }
   } else out.set('CONF:reload-worker', skip('no [service.worker] dev or [reload.worker]'));
   return out;
 }
 
 // Rewrites the file from inside the dev container, so its file watcher sees an ordinary save.
-async function edit(c: Container, r: Reload): Promise<number> {
-  const script = `const fs=require('fs');const f=${JSON.stringify(`/app/${r.file}`)};fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace(${JSON.stringify(r.find)},${JSON.stringify(r.replace)}))`;
+async function edit(c: Container, file: string, from: string, to: string): Promise<number> {
+  const script = `const fs=require('fs');const f=${JSON.stringify(`/app/${file}`)};fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace(${JSON.stringify(from)},${JSON.stringify(to)}))`;
   const t0 = Date.now();
   await must('docker', ['exec', c.name, 'node', '-e', script]);
   return t0;
@@ -116,11 +122,16 @@ async function reloadHttp(env: Env, web: Container, r: Reload | undefined): Prom
   const jar: Jar = new Map();
   const before = await req(env, web, jar, 'GET', r.url);
   if (before.text.includes(r.expect)) return fail(`${r.url} already contains "${r.expect}" before the edit`);
-  const t0 = await edit(web, r);
-  const seen = await until(15_000, async () => ((await req(env, web, new Map(), 'GET', r.url!)).text.includes(r.expect) ? Date.now() : undefined), 200);
+  const body = async () => (await req(env, web, new Map(), 'GET', r.url!)).text;
+  // A warm-up save, untimed (a first compile can be slow on a cold runner); then the timed one puts the file back.
+  await edit(web, r.file, r.find, r.replace);
+  const warm = await until(60_000, async () => ((await body()).includes(r.expect) ? true : undefined), 250);
+  if (!warm) return fail(`${r.url} didn’t change within 60 s of saving ${r.file}`);
+  const t0 = await edit(web, r.file, r.replace, r.find);
+  const seen = await until(15_000, async () => (!(await body()).includes(r.expect) ? Date.now() : undefined), 200);
   await sleep(0);
   return seen && seen - t0 <= BUDGET_MS ? pass(`${r.url} changed ${((seen - t0) / 1000).toFixed(1)} s after saving ${r.file}`)
-    : fail(seen ? `${r.url} took ${((seen - t0) / 1000).toFixed(1)} s to change (budget 5 s)` : `${r.url} didn’t change within 15 s of saving ${r.file}`);
+    : fail(seen ? `${r.url} took ${((seen - t0) / 1000).toFixed(1)} s to change (budget 5 s)` : `${r.url} didn’t change within 15 s of the second save`);
 }
 
 export { run };

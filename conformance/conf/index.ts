@@ -19,7 +19,7 @@ export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:logs-json', 'CONF:error-log',
-  'CONF:debug-route-hidden', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app',
+  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -167,6 +167,11 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       }));
       const s = sessionLine;
       const cookiesOk = !!s && s.httpOnly && s.sameSite === 'lax' && s.secure && s.lifetime !== null && s.lifetime > 0 && s.lifetime <= 86_400 + 60;
+      // SEC-5: every cookie set outside a mirror is a __Host- cookie (Secure, Path=/, no Domain).
+      const lines = [...got.start.cookies, ...(got.callback?.cookies ?? []), ...out1.cookies].map(cookieAttrs);
+      const loose = lines.filter((c) => !c.name.startsWith('__Host-') || !c.secure || c.path !== '/' || c.domain !== null);
+      set('CONF:host-cookies', (lines.length && !loose.length ? pass : fail)(!lines.length ? 'no cookies were set during sign-in'
+        : loose.length ? `not __Host- cookies (prefix, Secure, Path=/, no Domain): ${[...new Set(loose.map((c) => c.name))].join(', ')}` : `${new Set(lines.map((c) => c.name)).size} cookies, all __Host-`));
       const prodCookie = (cookiesOk ? pass : fail)(s ? `session cookie ${s.name}: HttpOnly ${s.httpOnly}, SameSite ${s.sameSite || 'unset'}, Secure ${s.secure}, lasts ${s.lifetime ?? 'the browser session'} s` : 'the callback set no session cookie');
       out.set('CONF:cookies', { ...prodCookie, perRule: { 'DEV-6': skip('dev mode not run') } });
     }
@@ -380,8 +385,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
 
     // PROC-4, PROC-6: SIGTERM with a request in flight.
     {
+      const before = (await env.logs(web)).length;
       const slow = fetch(`${env.base(web)}/api/debug/slow?ms=3000`, { signal: AbortSignal.timeout(30_000) }).then((r) => r.status, () => 0);
-      await sleep(500);
+      // SIGTERM only once the request is really in flight: the route logs as it begins (OBS-6).
+      await until(10_000, async () => ((await env.logs(web)).slice(before).some((l) => l.includes('slow request started')) ? true : undefined), 100);
       const stopped = await env.stop(web, 30);
       const status = await slow;
       const ok = status === 200 && stopped.seconds <= 25 && (stopped.exitCode === 0 || stopped.exitCode === 143);

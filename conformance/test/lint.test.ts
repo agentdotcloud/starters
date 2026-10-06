@@ -41,7 +41,7 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:secrets', await broken((d) => writeFileSync(join(d, 'server', 'key.ts'), `export const k = '${['sk', 'live', 'x'.repeat(24)].join('_')}';\n`))), 'fail');
   assert.equal(outcome('LINT:secrets', await broken((d) => writeFileSync(join(d, '.env'), 'X=1\n'))), 'fail');
   assert.equal(outcome('LINT:no-migrator', await broken((d) => writeFileSync(join(d, 'package.json'), '{ "name": "starter", "dependencies": { "prisma": "^6" } }\n'))), 'fail');
-  assert.equal(outcome('LINT:no-migrator', await broken((d) => writeFileSync(join(d, 'server', 'boot.ts'), "await db.query('CREATE TABLE IF NOT EXISTS x (id int)');\n"))), 'fail', 'DDL at runtime');
+  assert.equal(outcome('LINT:no-migrator', await broken((d) => writeFileSync(join(d, 'server', 'olap.py'), "duck.execute('CREATE TABLE t AS SELECT 1')\n"))), 'pass', 'in-process DuckDB DDL is fine');
   assert.equal(outcome('LINT:uuid-keys', await broken((d) => writeFileSync(join(d, 'migrations', '0001_init.sql'), readFileSync(join(GOOD, 'migrations', '0001_init.sql'), 'utf8').replace('users (id uuid', 'users (id bigserial')))), 'fail');
   assert.equal(outcome('LINT:migrations', await broken((d) => writeFileSync(join(d, 'migrations', 'Init.sql'), 'SELECT 1;\n')), 'DATA-2'), 'fail', 'a misnamed migration');
   assert.equal(outcome('LINT:manifest', await broken((d) => writeFileSync(join(d, 'agentcloud.toml'), readFileSync(join(GOOD, 'agentcloud.toml'), 'utf8').replace('health = "/api/health"', 'health = "/healthz"'))), 'MAN-3'), 'fail');

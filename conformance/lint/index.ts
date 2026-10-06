@@ -126,11 +126,10 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
       const list = [...((table(p.project).dependencies as string[] | undefined) ?? []), ...Object.values(table(p['dependency-groups'])).flat() as string[]];
       deps.push(...list.map((d) => String(d).split(/[<>=!~\[; ]/)[0]!));
     }
+    // Runtime DDL against Postgres is CONF:no-ddl's to prove: a grep can't tell it from DuckDB's in-process
+    // `CREATE TABLE … AS SELECT`, or from a comment.
     const migrators = deps.filter((d) => MIGRATORS.test(d));
-    const ddl = grep(s, /\b(create|alter|drop)\s+(table|index|schema|type|extension|view)\b/i);
-    return migrators.length || ddl.length
-      ? fail([migrators.length ? `depends on ${migrators.join(', ')}` : '', ddl.length ? `DDL in app code: ${ddl.join(', ')}` : ''].filter(Boolean).join('; '))
-      : pass('no ORM migrator, and no DDL outside migrations/');
+    return migrators.length ? fail(`depends on ${migrators.join(', ')}`) : pass('no ORM migrator among the dependencies');
   },
 
   'LINT:uuid-keys': (s) => {
