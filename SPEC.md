@@ -34,7 +34,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 
 - **PROC-1:** `web` listens on `0.0.0.0:$PORT`, never `127.0.0.1` or a fixed port. `CONF:bind` (reached from another container)
 - **PROC-2:** One port serves both: the UI at `/` (HTML), and the API under `/api/`. An unknown `/api/...` path answers JSON 404; any other unknown path answers the UI's `index.html`, so client-side routes survive a reload. `CONF:routes`
-- **PROC-3:** `GET /api/health` answers 200 with JSON, no sign-in, within 30 s of the process starting (the platform waits up to 3 minutes: `release.ts` ready). It answers 503 while the database is unreachable. `CONF:health`
+- **PROC-3:** `GET /api/health` answers 200 with JSON, no sign-in, within 30 s of the process starting (the platform waits up to 3 minutes: `release.ts` ready), and never touches the database. The platform probes it every 2 s for the life of the pod (`release.ts` readinessProbe), so a database query there would keep the database awake forever and turn a short database blip into a full outage. Database trouble shows as a 503 on the request that needs the database, and in the logs. `CONF:health` (it stays 200 with the fake database stopped)
 - **PROC-4:** On SIGTERM, `web` stops taking new connections, finishes requests in flight, and exits within 25 s with status 0. The platform gives web the Kubernetes default of 30 s before SIGKILL. `CONF:sigterm-web` (a request in flight when SIGTERM arrives still completes)
 - **PROC-5:** On SIGTERM, the worker finishes the job in hand, claims no new one, and exits within 50 s with status 0 (the worker's grace is 60 s: `terminationGracePeriodSeconds: 60`). `CONF:sigterm-worker`
 - **PROC-6:** Signals reach the app through the platform's wrappers (`build.ts` forwarding and agc-start), so the app must not detach, fork into the background, or ignore SIGTERM. `CONF:sigterm-web`, `CONF:sigterm-worker` (run under the same wrapper)
@@ -61,6 +61,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **DATA-4:** Users and entities are keyed on `uuid` columns. Masking keeps uuids and masks high-cardinality text (`packages/control/src/policy.ts`), so a mirror's rows still line up with production's ids. `LINT:uuid-keys`
 - **DATA-5:** The connection pool holds at most 10 connections per process. `review`
 - **DATA-6:** Queries are parameterized; no SQL is built from request input by string concatenation. `review`
+- **DATA-7 (SHOULD):** Columns that hold a fixed set of values (a status, a kind) use a `CHECK (col IN (…))` list or an enum. Masking keeps those exactly (`policy.ts`), so mirrors show the real states. `LINT:fixed-values` (reported)
 
 ## 6. Platform services
 
@@ -84,7 +85,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
 - **OBS-1:** Logs go to stdout and stderr as one JSON object per line, with `level` (`debug`, `info`, `warn`, `error`) and `msg`. The platform classifies by `level`; plain text falls back to keyword guessing. `CONF:logs-json` (at least 95% of lines parse, and every line from app code parses)
-- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`, which exists only when `AGENTCLOUD_CONFORMANCE` is set)
+- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`). That route answers 404 unless `AGENTCLOUD_CONFORMANCE=1`. `CONF:debug-route-hidden` (404 without the variable)
 - **OBS-3:** Business steps emit workflow events: `{"agc":"event","name","entity","related","status","attrs"}`, with `name` matching `^[a-z][a-z0-9_.-]{0,63}$` and `entity` and each `related` matching `^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_.-]{1,64}$`. The starter emits `note.created` and `note.emailed` with `note:<uuid>`. `CONF:events`
 - **OBS-4:** No personal data in logs or events: no emails, names or tokens, at any level. `CONF:no-pii` (a distinctive address signs in and creates notes; it never appears in any log line)
 - **OBS-5 (SHOULD):** No per-request access log at `info`: Traefik already records every request with its status and latency. `CONF:logs-json` (reported)
@@ -94,6 +95,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **CHK-1:** The manifest has at least one `[[check.smoke]]` flow that starts with `SIGN IN`, and one `[[check.invariant]]` paired with a smoke flow whose write step races (`xN`). `LINT:checks`
 - **CHK-2:** Every smoke flow passes against the built app on the fake platform, run by agc's own `runFlow`. `CONF:smoke`
 - **CHK-3:** Every invariant returns no rows after the smoke flows. `CONF:invariants`
+- **CHK-4:** Checks are safe to run on a branch of production: each smoke flow creates the data it needs (with `{run}` in anything that must be unique) and depends on no row existing beforehand, and every invariant holds on any real data, not only the starter's own. `CONF:smoke` (run twice against the same database, and once against a database seeded with unrelated rows), `review`
 
 ## 9. Security
 
@@ -122,13 +124,13 @@ conformance/
   platform/           the fake platform: a Postgres 18 container that only accepts verified TLS,
                       a test-mode sign-in server (authorize, token, users, codes), and an email
                       endpoint that records each key once
-  images/             the default image for each language, copied from agent-cloud's runner
-  vendor/agc/         checks.ts and migrations.ts from agent-cloud at a pinned commit (sync.sh refreshes them)
+  images/             each language's default Dockerfile, generated from the vendored runner build.ts
+  vendor/agc/         checks.ts, migrations.ts and runner build.ts from agent-cloud at a pinned commit (sync.sh refreshes them)
 ```
 
 1. **Lint** the stack directory (no Docker needed).
 2. **Build** the image with the language's default Dockerfile, with no network to the fake platform.
-3. **Start the fake platform** on a private Docker network, and apply `migrations/` the way `agc migrate` does.
+3. **Start the fake platform** on a private Docker network, and apply `migrations/` the way `agc migrate` does. The fake database serves TLS with a certificate for its network name (`db`), signed by a throwaway CA. The app trusts that CA the way it trusts Neon's in production: Node through `NODE_EXTRA_CA_CERTS`; libpq, with the platform's `PGSSLROOTCERT=system`, through `SSL_CERT_FILE`. So `verify-full` is really checked, hostname included.
 4. **Run** `web` and the worker from the image, each capped at 512 MiB, with the app directory read-only and the environment the platform injects (`PORT`, `DATABASE_URL`, `PGSSLROOTCERT`, `AGC_EMAIL_*`, `AGC_AUTH_*`).
 5. **Probe** each `CONF:*` rule over HTTP, signals, container logs and SQL, then the checks with agc's own `runFlow`, invariants and `checkSignInState`.
 6. **Dev mode:** run `dev` on a copy of the source, edit a server file, a UI file and a worker file, and watch each change land without a restart.
@@ -136,8 +138,8 @@ conformance/
 
 CI runs the suite for every stack on every PR. A new stack is added by passing it ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
-## Open questions
+## Decisions (from review)
 
-1. **Web grace period (platform):** web has the Kubernetes default of 30 s; the worker has 60 s set explicitly. Should web get 60 s too, or should PROC-4 keep its 25 s budget? (agent.cloud's call.)
-2. **The Python default image (platform):** this spec assumes a Node stage builds the UI when `package.json` exists, then `python:3.12-slim` with uv: `uv sync --frozen --no-dev`, `.venv/bin` on `PATH`, `PYTHONUNBUFFERED=1` (OBS-1 needs unbuffered lines), a non-root user, and the manifest's `command` under the same signal wrapper.
-3. **`/api/debug/error` (OBS-2):** a route that exists only under `AGENTCLOUD_CONFORMANCE` is the simplest way to prove error logging black-box. The alternative, a review-only rule, leaves the most common observability gap untested.
+1. **Web grace period:** web keeps 30 s (agent.cloud now sets `terminationGracePeriodSeconds: 30` on web explicitly), and PROC-4 keeps its 25 s budget.
+2. **The Python default image** (agent.cloud builds it): a Node stage builds the UI when `package.json` exists, into `web/dist` (the same path in every stack). Then `python:3.12-slim` with uv: `uv sync --frozen --no-dev` with `UV_COMPILE_BYTECODE=1`, `UV_LINK_MODE=copy` and `UV_PYTHON_DOWNLOADS=never`, `.venv/bin` on `PATH`, `PYTHONUNBUFFERED=1`, a non-root user, and the manifest's `command` under the same signal wrapper.
+3. **`/api/debug/error`:** kept for OBS-2, as a 404 unless `AGENTCLOUD_CONFORMANCE=1`, with its own check.
