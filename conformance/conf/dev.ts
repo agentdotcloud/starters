@@ -11,6 +11,7 @@ import type { Reload } from '../lib/stack.ts';
 import { cookieAttrs, type Jar, req, signIn } from './http.ts';
 
 const BUDGET_MS = 5000;
+const SETTLE_MS = 1500; // between the warm-up save and the timed one: watchers coalesce saves that land closer together
 
 // Python's dev image carries Node too: the starter's UI runs under Vite next to uvicorn.
 const PYTHON_DEV = [
@@ -98,6 +99,7 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
       await edit(w, r.file, r.find, r.replace);
       const warm = await until(60_000, async () => ((await env.logs(w)).some((l) => l.includes(r.expect)) ? true : undefined), 250);
       const count = async () => (await env.logs(w)).filter((l) => l.includes(r.find)).length;
+      await sleep(SETTLE_MS);
       const n = await count();
       const t0 = await edit(w, r.file, r.replace, r.find);
       const seen = warm ? await until(15_000, async () => ((await count()) > n ? Date.now() : undefined), 200) : undefined;
@@ -127,6 +129,7 @@ async function reloadHttp(env: Env, web: Container, r: Reload | undefined): Prom
   await edit(web, r.file, r.find, r.replace);
   const warm = await until(60_000, async () => ((await body()).includes(r.expect) ? true : undefined), 250);
   if (!warm) return fail(`${r.url} didn’t change within 60 s of saving ${r.file}`);
+  await sleep(SETTLE_MS);
   const t0 = await edit(web, r.file, r.replace, r.find);
   const seen = await until(15_000, async () => (!(await body()).includes(r.expect) ? Date.now() : undefined), 200);
   await sleep(0);

@@ -1,0 +1,148 @@
+"""The app: sign-in, the notes API, health, and in production the built UI (web/dist), all on one port."""
+
+import asyncio
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import psycopg
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from . import log
+from .auth import router as auth_router
+from .auth import signed_in
+from .db import pool, tx
+
+UI = Path("web/dist")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    pool.open(wait=False)  # health answers at once; the pool connects in the background
+    yield
+    pool.close()
+
+
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    # Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here
+    # with this app's cookies; a JSON body would need a CORS preflight, which this app never grants.
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not request.headers.get("content-type", "").startswith("application/json"):
+        refusal = {"code": "json_required", "message": "Send a JSON body (Content-Type: application/json)."}
+        response: Response = JSONResponse({"error": refusal}, 415)
+    else:
+        try:
+            response = await call_next(request)
+        except Exception as e:  # noqa: BLE001 - logged once here, with its stack in a field, and answered without it
+            route = request.scope.get("route")
+            log.error("request failed", exc=e, method=request.method, path=getattr(route, "path", "?"))
+            response = JSONResponse({"error": {"code": "internal", "message": "Something went wrong."}}, 500)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
+
+
+# Health answers as soon as the server can serve, without touching the database: agent.cloud asks every 2 seconds.
+@app.get("/api/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+app.include_router(auth_router)
+
+
+@app.get("/api/me")
+def me(request: Request) -> dict[str, object]:
+    return {"user": signed_in(request)}
+
+
+@app.get("/api/notes")
+def notes(request: Request) -> list[dict[str, object]]:
+    user = signed_in(request)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id::text AS id, title, created_at FROM notes WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 100",
+            (user["id"],),
+        ).fetchall()
+    return [{**r, "created_at": r["created_at"].isoformat()} for r in rows]
+
+
+@app.post("/api/notes", status_code=201)
+async def add_note(request: Request) -> Response:
+    user = await asyncio.to_thread(signed_in, request)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    raw = body.get("title") if isinstance(body, dict) else None
+    title = raw.strip() if isinstance(raw, str) else ""
+    if not title or len(title) > 200:
+        return JSONResponse({"error": {"code": "bad_title", "message": "A title is 1 to 200 characters."}}, 400)
+    try:
+        note = await asyncio.to_thread(_insert_note, user["id"], title)
+    except psycopg.errors.UniqueViolation:
+        return JSONResponse({"error": {"code": "duplicate", "message": "You already have a note with that title."}}, 409)
+    log.event("note.created", f"note:{note['id']}", related=[f"user:{user['id']}"])
+    return JSONResponse({**note, "created_at": note["created_at"].isoformat()}, 201)
+
+
+def _insert_note(user_id: str, title: str) -> dict[str, Any]:
+    # The note and the job that emails about it are saved together, or not at all.
+    with tx() as conn:
+        note = conn.execute(
+            "INSERT INTO notes (user_id, title) VALUES (%s, %s) RETURNING id::text AS id, title, created_at", (user_id, title)
+        ).fetchone()
+        assert note is not None
+        conn.execute("INSERT INTO jobs (kind, payload) VALUES ('note_email', jsonb_build_object('note_id', %s::text))", (note["id"],))
+    return note
+
+
+# Only for agent.cloud's conformance suite: an error and a slow request, to prove logging and graceful shutdown.
+if os.environ.get("AGENTCLOUD_CONFORMANCE") == "1":
+
+    @app.get("/api/debug/error")
+    def debug_error() -> None:
+        raise RuntimeError("a deliberate failure, for the conformance suite")
+
+    @app.get("/api/debug/slow")
+    async def debug_slow(ms: int = 0) -> dict[str, bool]:
+        log.info("slow request started")
+        await asyncio.sleep(min(ms, 10_000) / 1000)
+        return {"ok": True}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(_: Request, e: StarletteHTTPException) -> Response:
+    return JSONResponse({"error": {"code": "http", "message": str(e.detail)}}, e.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def bad_request(_: Request, e: RequestValidationError) -> Response:
+    return JSONResponse({"error": {"code": "bad_request", "message": "The request isn't valid."}}, 400)
+
+
+# The UI: its built files, and any other path is a page of it (it routes on the client).
+if UI.is_dir():
+    app.mount("/assets", StaticFiles(directory=UI / "assets"), name="assets")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def page(path: str) -> Response:
+    if path.startswith("api/") or path == "api":
+        raise HTTPException(404, "No such API route.")
+    file = UI / path
+    if path and file.is_file() and UI.resolve() in file.resolve().parents:
+        return FileResponse(file)
+    if not (UI / "index.html").is_file():
+        return JSONResponse({"error": {"code": "no_ui", "message": "The UI isn't built: run npm run build."}}, 404)
+    return FileResponse(UI / "index.html", media_type="text/html")

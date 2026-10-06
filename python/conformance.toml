@@ -1,0 +1,23 @@
+# For agent.cloud's starter conformance suite only (which files its reload tests edit); `agc init` doesn't copy it.
+[dev]
+setup = "uv sync && npm ci"
+
+[reload.api]
+file = "app/main.py"
+find = 'return {"status": "ok"}'
+replace = 'return {"status": "reloaded"}'
+url = "/api/health"
+expect = "reloaded"
+
+[reload.ui]
+file = "web/src/App.tsx"
+find = "Your notes"
+replace = "Your reloaded notes"
+url = "/src/App.tsx"
+expect = "Your reloaded notes"
+
+[reload.worker]
+file = "app/worker.py"
+find = "worker ready"
+replace = "worker reloaded"
+expect = "worker reloaded"
