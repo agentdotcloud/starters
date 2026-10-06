@@ -35,7 +35,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **PROC-1:** `web` listens on `0.0.0.0:$PORT`, never `127.0.0.1` or a fixed port. `CONF:bind` (reached from another container)
 - **PROC-2:** One port serves both: the UI at `/` (HTML), and the API under `/api/`. An unknown `/api/...` path answers JSON 404; any other unknown path answers the UI's `index.html`, so client-side routes survive a reload. `CONF:routes`
 - **PROC-3:** `GET /api/health` answers 200 with JSON, no sign-in, within 30 s of the process starting (the platform waits up to 3 minutes: `release.ts` ready), and never touches the database. The platform probes it every 2 s for the life of the pod (`release.ts` readinessProbe), so a database query there would keep the database awake forever and turn a short database blip into a full outage. Database trouble shows as a 503 on the request that needs the database, and in the logs. `CONF:health` (it stays 200 with the fake database stopped)
-- **PROC-4:** On SIGTERM, `web` stops taking new connections, finishes requests in flight, and exits within 25 s with status 0. The platform gives web the Kubernetes default of 30 s before SIGKILL. `CONF:sigterm-web` (a request in flight when SIGTERM arrives still completes)
+- **PROC-4:** On SIGTERM, `web` stops taking new connections, finishes requests in flight, and exits within 25 s with status 0. The platform gives web 30 s before SIGKILL. `CONF:sigterm-web` (a `GET /api/debug/slow?ms=3000` in flight when SIGTERM arrives still completes)
 - **PROC-5:** On SIGTERM, the worker finishes the job in hand, claims no new one, and exits within 50 s with status 0 (the worker's grace is 60 s: `terminationGracePeriodSeconds: 60`). `CONF:sigterm-worker`
 - **PROC-6:** Signals reach the app through the platform's wrappers (`build.ts` forwarding and agc-start), so the app must not detach, fork into the background, or ignore SIGTERM. `CONF:sigterm-web`, `CONF:sigterm-worker` (run under the same wrapper)
 - **PROC-7:** `web` and the worker each stay under 256 MiB at rest, and under 512 MiB while the checks run. `CONF:memory` (containers capped at 512 MiB; an OOM fails it)
@@ -85,7 +85,8 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
 - **OBS-1:** Logs go to stdout and stderr as one JSON object per line, with `level` (`debug`, `info`, `warn`, `error`) and `msg`. The platform classifies by `level`; plain text falls back to keyword guessing. `CONF:logs-json` (at least 95% of lines parse, and every line from app code parses)
-- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`). That route answers 404 unless `AGENTCLOUD_CONFORMANCE=1`. `CONF:debug-route-hidden` (404 without the variable)
+- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`).
+- **OBS-6:** Two conformance-only routes, `GET /api/debug/error` (throws) and `GET /api/debug/slow?ms=N` (answers 200 after N ms, at most 10000), exist only when `AGENTCLOUD_CONFORMANCE=1`; otherwise both answer 404. `CONF:debug-route-hidden`
 - **OBS-3:** Business steps emit workflow events: `{"agc":"event","name","entity","related","status","attrs"}`, with `name` matching `^[a-z][a-z0-9_.-]{0,63}$` and `entity` and each `related` matching `^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_.-]{1,64}$`. The starter emits `note.created` and `note.emailed` with `note:<uuid>`. `CONF:events`
 - **OBS-4:** No personal data in logs or events: no emails, names or tokens, at any level. `CONF:no-pii` (a distinctive address signs in and creates notes; it never appears in any log line)
 - **OBS-5 (SHOULD):** No per-request access log at `info`: Traefik already records every request with its status and latency. `CONF:logs-json` (reported)
@@ -95,18 +96,73 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **CHK-1:** The manifest has at least one `[[check.smoke]]` flow that starts with `SIGN IN`, and one `[[check.invariant]]` paired with a smoke flow whose write step races (`xN`). `LINT:checks`
 - **CHK-2:** Every smoke flow passes against the built app on the fake platform, run by agc's own `runFlow`. `CONF:smoke`
 - **CHK-3:** Every invariant returns no rows after the smoke flows. `CONF:invariants`
-- **CHK-4:** Checks are safe to run on a branch of production: each smoke flow creates the data it needs (with `{run}` in anything that must be unique) and depends on no row existing beforehand, and every invariant holds on any real data, not only the starter's own. `CONF:smoke` (run twice against the same database, and once against a database seeded with unrelated rows), `review`
+- **CHK-4:** Checks are safe to run on a branch of production: each smoke flow creates the data it needs (with `{run}` in anything that must be unique) and depends on no row existing beforehand, and every invariant holds on any real data, not only the starter's own. `CONF:smoke` (every flow runs twice against the same database, so the second run meets the first run's rows), `review`
 
 ## 9. Security
 
 - **SEC-1:** No secrets in the repo: nothing matching agent.cloud's secret patterns (`packages/control/src/github.ts` secretIn), and no `.env` files. `LINT:secrets`
 - **SEC-2:** No CORS for credentialed requests, and nothing trusts an `Origin`, `Referer` or redirect target because it ends in `.agent.cloud`: apps are neighbours on the same site. Every state-changing route checks the session and takes no GETs. `LINT:no-cors`, `review`
+- **SEC-4:** Every state-changing route (`POST`, `PUT`, `PATCH`, `DELETE`) requires `Content-Type: application/json` and answers 415 otherwise. Apps on agent.cloud share a site, so `SameSite=Lax` cookies ride along on another app's form posts; a JSON body forces a CORS preflight, which SEC-2 never grants. `CONF:csrf-json` (a form post to `POST /api/notes` is refused and creates nothing)
 - **SEC-3 (SHOULD):** Responses carry `X-Content-Type-Options: nosniff`, and HTML responses a `frame-ancestors` CSP. `CONF:headers`
 
 ## 10. Documentation
 
 - **DOC-1:** `README.md` says what the starter is, the one command to run it locally, where the server, worker, UI, migrations and checks live, and how to add an API route and a job. `review`
-- **DOC-2:** `AGENTS.md` holds a stack section below agc's line (agc leaves everything below it alone): the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `LINT:agents-md`
+- **DOC-2:** `AGENTS.md` holds the stack section only: the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `agc init` appends agent.cloud's own section after it (`packages/cli/src/commands/init.ts` writeAgentsMd), so the starter's file must not contain agc's heading `# agent.cloud: how to work on this app`. `LINT:agents-md`
+
+## 11. The starter app
+
+Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it: people sign in, keep notes, and get an email for each note.
+
+- **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns. `LINT:migrations`
+- **APP-2:** `GET /api/notes` answers the signed-in person's notes, newest first, as `[{id, title, created_at}]`. Signed out, it answers 401. `CONF:app`
+- **APP-3:** `POST /api/notes {title}` answers 201 with the note. A missing or overlong title gets 400, a title the person already has gets 409, and signed out gets 401. In the same transaction it inserts a `note_email` job, and it logs a `note.created` event for `note:<id>`. `CONF:app`, `CONF:events`
+- **APP-4:** The worker handles `note_email`: it emails the person (when sign-in gave an email) with the key `note-<id>/created`, then logs `note.emailed` for `note:<id>`. `CONF:mail`, `CONF:events`
+- **APP-5:** The manifest's checks include the flow and invariant below, or stricter ones:
+  ```toml
+  [[check.smoke]]
+  name  = "one note per title, even when racing"
+  steps = [
+    "SIGN IN racer-{run}@example.test",
+    "POST /api/notes {title: 'Hello {run}'} -> 201|409 x10",
+    "GET /api/notes -> 200",
+  ]
+  [[check.invariant]]
+  name = "a title once per person"
+  sql  = "SELECT user_id, title FROM notes GROUP BY user_id, title HAVING count(*) > 1"
+  ```
+  `LINT:checks`, `CONF:smoke`
+
+## 12. The conformance descriptor
+
+Auto-reload (DEV-2 to DEV-4) can only be proven by editing a real file, so each starter says which, in `conformance.toml` at its root. `agc init` doesn't copy this file.
+
+```toml
+[reload.api]     # edit `file`, replacing `find` with `replace`; within 5 s, GET `url` contains `expect`
+file = "server/health.ts"
+find = "status: 'ok'"
+replace = "status: 'reloaded'"
+url = "/api/health"
+expect = "reloaded"
+
+[reload.ui]      # the same, for a UI module the dev server serves
+file = "web/src/App.tsx"
+find = "Your notes"
+replace = "Your reloaded notes"
+url = "/src/App.tsx"
+expect = "Your reloaded notes"
+
+[dev]            # run once in a fresh copy before `dev` (DEV-5): the one install command the README gives
+setup = "npm ci"
+
+[reload.worker]  # the same, but `expect` must appear in the worker's log
+file = "server/worker.ts"
+find = "worker ready"
+replace = "worker reloaded"
+expect = "worker reloaded"
+```
+
+- **DSC-1:** `conformance.toml` has `[dev] setup` and all three reload probes, and each `find` occurs exactly once in its `file`, so every probe edits one exact spot. `LINT:descriptor`
 
 ## Out of scope for v1
 

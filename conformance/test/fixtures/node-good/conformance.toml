@@ -1,0 +1,22 @@
+[dev]
+setup = "npm ci"
+
+[reload.api]
+file = "server/health.ts"
+find = "status: 'ok'"
+replace = "status: 'reloaded'"
+url = "/api/health"
+expect = "reloaded"
+
+[reload.ui]
+file = "web/src/App.tsx"
+find = "Your notes"
+replace = "Your reloaded notes"
+url = "/src/App.tsx"
+expect = "Your reloaded notes"
+
+[reload.worker]
+file = "server/worker.ts"
+find = "worker ready"
+replace = "worker reloaded"
+expect = "worker reloaded"
