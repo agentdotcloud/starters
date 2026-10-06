@@ -1,12 +1,17 @@
 // Background work: jobs from the `jobs` table, claimed with a lease (AGENTS.md "Background work"). A job a dead worker
 // held runs again once its lease lapses, so every job is safe to run twice: emails carry a key that names the message,
 // and agent.cloud sends each key once. On SIGTERM the worker finishes the job in hand and exits.
-import pg from 'pg';
+//
+// With nothing to do it backs off (10 s, 20 s, 40 s … up to 10 minutes) and holds no database connection between polls,
+// so the database can go to sleep. The first email after a quiet spell can take a few minutes: that's the price of not
+// paying for an always-awake database.
 import { pool } from './db.ts';
 import { required } from './env.ts';
 import { event, log } from './log.ts';
 
-const { AGC_EMAIL_URL, AGC_EMAIL_TOKEN, DATABASE_URL } = required('AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN', 'DATABASE_URL');
+const { AGC_EMAIL_URL, AGC_EMAIL_TOKEN } = required('AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN');
+const POLL_S = Number(process.env.WORKER_POLL_SECONDS ?? 10);
+const IDLE_MAX_S = Number(process.env.WORKER_IDLE_MAX_SECONDS ?? 600);
 interface Job { id: string; kind: string; payload: Record<string, unknown>; attempts: number }
 
 let stopping = false;
@@ -56,22 +61,18 @@ async function work(job: Job) {
   }
 }
 
-// New jobs wake the worker at once (NOTIFY jobs); otherwise it looks every 10 s, for retries and lapsed leases.
-async function listen() {
-  const client = new pg.Client({ connectionString: DATABASE_URL });
-  client.on('error', () => setTimeout(listen, 5000));
-  client.on('notification', () => wake());
-  await client.connect();
-  await client.query('LISTEN jobs');
-}
-
 async function main() {
-  await listen().catch((e) => log.warn('couldn’t listen for new jobs; polling instead', { error: (e as Error).message }));
   log.info('worker ready');
+  let wait = POLL_S;
   while (!stopping) {
     const job = await claim().catch((e) => { log.warn('couldn’t claim a job', { error: (e as Error).message }); return null; });
-    if (job) { await work(job); continue; }
-    await new Promise<void>((r) => { const t = setTimeout(r, 10_000); wake = () => { clearTimeout(t); r(); }; });
+    if (job) {
+      await work(job);
+      wait = POLL_S; // busy again: back to the short interval
+      continue;
+    }
+    await new Promise<void>((r) => { const t = setTimeout(r, wait * 1000); wake = () => { clearTimeout(t); r(); }; });
+    wait = Math.min(wait * 2, IDLE_MAX_S);
   }
   await pool.end().catch(() => {});
   log.info('worker stopped');

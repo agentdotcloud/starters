@@ -57,7 +57,6 @@ app.post('/api/notes', async (c) => {
       const { rows } = await db.query<{ id: string; title: string; created_at: string }>(
         'INSERT INTO notes (user_id, title) VALUES ($1, $2) RETURNING id, title, created_at', [user.id, title]);
       await db.query(`INSERT INTO jobs (kind, payload) VALUES ('note_email', $1)`, [{ note_id: rows[0]!.id }]);
-      await db.query('NOTIFY jobs');
       return rows[0]!;
     });
     event('note.created', `note:${note.id}`, { related: [`user:${user.id}`] });

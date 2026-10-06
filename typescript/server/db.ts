@@ -6,7 +6,9 @@ import { log } from './log.ts';
 
 const { DATABASE_URL } = required('DATABASE_URL');
 
-export const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+// Idle connections close after a second, so a quiet app holds none and its database can sleep (Neon suspends a compute
+// with no connections after 5 minutes). Reconnecting costs a few milliseconds when work arrives.
+export const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, idleTimeoutMillis: 1_000, connectionTimeoutMillis: 10_000 });
 pool.on('error', (e) => log.warn('database connection lost', { error: e.message }));
 
 // Runs `fn` in one transaction: everything it writes lands together, or nothing does.

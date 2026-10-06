@@ -27,7 +27,7 @@ migrations/         schema changes, as plain SQL (agc migration new <slug>)
 
 - **An API route:** in `server/app.ts`, under `/api/`. Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415).
 - **A table or column:** `agc migration new <slug>`, then plain SQL in the new file, then `agc migrate`. Key things on `uuid`. Use `CHECK (status IN (…))` for fixed sets of values, so mirrors show them. Never change the schema from code.
-- **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, run `NOTIFY jobs`, and add a handler in `server/worker.ts`. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
+- **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, and add a handler in `server/worker.ts`. The worker polls every 10 s while busy and backs off to 10 minutes when idle, so the database can sleep: don't make a person wait on a job. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
 - **A workflow step:** `event('order.paid', 'order:<id>', { related: ['user:<id>'] })`. Ids only, never emails or names.
 - **Logging:** `log.info('what happened', { ids })`. Never log emails, names, tokens or request bodies.
 
