@@ -1,16 +1,17 @@
 # agent.cloud starter: TypeScript
 
-A small, complete app to grow from. People sign in with Google or an email link, keep notes, and get an email for each note. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](../SPEC.md).
+A small, complete app to grow from. People sign in with Google or an email link, keep notes, and get an email for each note. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](https://github.com/agentdotcloud/starters/blob/main/SPEC.md).
 
 ## Run it
 
 ```sh
 agc init --stack typescript --name <what-it-does>   # in an empty folder: copies this, creates the app
+npm ci                                               # once, and after a dependency changes
 agc up --detach                                      # your mirror: http://localhost:<port>, reloading on save
 agc check && agc ship
 ```
 
-`agc up` runs `npm ci` itself the first time. You only need Node 24.
+You only need Node 24. `agc up` doesn't install dependencies: run `npm ci` first.
 
 ## Layout
 
