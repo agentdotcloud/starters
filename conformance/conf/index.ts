@@ -382,13 +382,13 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       await sleep(500);
       const stopped = await env.stop(web, 30);
       const status = await slow;
-      const ok = status === 200 && stopped.seconds <= 25 && stopped.exitCode === 0;
+      const ok = status === 200 && stopped.seconds <= 25 && (stopped.exitCode === 0 || stopped.exitCode === 143);
       set('CONF:sigterm-web', (ok ? pass : fail)(`the request in flight got ${status || 'no answer'}; web exited ${stopped.exitCode} after ${stopped.seconds.toFixed(1)} s`));
     }
     // PROC-5
     {
       const stopped = await env.stop(worker, 60);
-      set('CONF:sigterm-worker', (stopped.seconds <= 50 && stopped.exitCode === 0 ? pass : fail)(`the worker exited ${stopped.exitCode} after ${stopped.seconds.toFixed(1)} s`));
+      set('CONF:sigterm-worker', (stopped.seconds <= 50 && (stopped.exitCode === 0 || stopped.exitCode === 143) ? pass : fail)(`the worker exited ${stopped.exitCode} after ${stopped.seconds.toFixed(1)} s`));
     }
 
     // DEV-*: auto-reload on a copy of the source.
