@@ -1,16 +1,17 @@
 # agent.cloud starter: Python
 
-A small, complete app to grow from. People sign in with Google or an email link, keep notes, and get an email for each note. It's built on FastAPI, psycopg 3 and uv, with a React UI. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](../SPEC.md).
+A small, complete app to grow from. People sign in with Google or an email link, keep notes, and get an email for each note. It's built on FastAPI, psycopg 3 and uv, with a React UI. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](https://github.com/agentdotcloud/starters/blob/main/SPEC.md).
 
 ## Run it
 
 ```sh
 agc init --stack python --name <what-it-does>   # in an empty folder: copies this, creates the app
+uv sync && npm ci                                # once, and after a dependency changes
 agc up --detach                                  # your mirror: http://localhost:<port>, reloading on save
 agc check && agc ship
 ```
 
-You need uv and Node 24 (for the UI). `agc up` runs `uv sync && npm ci` itself the first time.
+You need uv and Node 24 (for the UI). `agc up` doesn't install dependencies: run `uv sync && npm ci` first.
 
 ## Layout
 

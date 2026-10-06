@@ -5,6 +5,7 @@ A FastAPI API on uvicorn and a React UI (Vite), served together on `$PORT`. Ther
 ## Commands
 
 ```text
+uv sync && npm ci          install dependencies (once, and after uv.lock or package-lock.json changes)
 agc up --detach            the app on your mirror: UI and API on one port, reloading on save
 uv run pytest              the app's own tests (agent.cloud's checks run separately: agc check)
 uv run ruff check . && uv run ruff format .   lint and format

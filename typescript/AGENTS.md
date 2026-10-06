@@ -5,6 +5,7 @@ A React UI (Vite) and one Node 24 server (Hono) that serves the UI and the API o
 ## Commands
 
 ```text
+npm ci               install dependencies (once, and after package-lock.json changes)
 agc up --detach      the app on your mirror: UI and API on one port, reloading on save
 npm run typecheck    tsc over the server and the UI
 npm run build        the UI into web/dist (agent.cloud runs this when it builds the image)
