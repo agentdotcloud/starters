@@ -338,7 +338,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const after = await env.claims(t0);
       const fast = after.slice(1).map((t, i) => (t - after[i]!) / 1000).filter((g) => g < 1.5).length;
       const grew = gaps.length >= 2 && Math.max(...gaps) >= 3 && Math.max(...gaps) <= 6;
-      const quiet = held.filter((n) => n === 0).length >= 9;
+      const quiet = held.filter((n) => n === 0).length >= 11; // one sample may land on a poll's own connection
       const ok = grew && quiet && !!got && fast >= 1;
       set('CONF:jobs-idle', (ok ? pass : fail)(`idle gaps between claims: ${gaps.map((g) => g.toFixed(1)).join(', ') || 'none seen'} s (should grow to about 4); worker connections in ${held.filter((n) => n === 0).length} of 12 idle samples: none; a new job emailed ${got ? `${((got - t0) / 1000).toFixed(1)} s` : 'never'} after it was created, then ${fast} quick polls`));
     }

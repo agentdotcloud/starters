@@ -1,0 +1,2 @@
+# Release assets: agc init copies a stack without the conformance suite's descriptor.
+conformance.toml export-ignore

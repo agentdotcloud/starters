@@ -1,0 +1,76 @@
+# Every stack must pass SPEC.md on every change: its own checks, then the conformance suite (lint, the default image,
+# the fake platform, dev-mode reloads). A starter that doesn't pass fails the PR.
+name: conformance
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# GitHub's default `bash -e` has no pipefail, so `run.ts | tee` would pass with tee's exit code. This turns it on.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  suite:
+    name: the suite's own tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci
+        working-directory: conformance
+      - run: npx tsc --noEmit -p . && npm test
+        working-directory: conformance
+      - name: every stack shares the same UI
+        run: |
+          for s in */agentcloud.toml; do d=$(dirname "$s"); [ "$d" = typescript ] || diff -r typescript/web "$d/web" -x dist -x node_modules; done
+
+  stack:
+    name: ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [typescript, python]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: the stack's own checks (TypeScript)
+        if: matrix.stack == 'typescript'
+        working-directory: typescript
+        run: npm ci && npx tsc --noEmit
+      - uses: astral-sh/setup-uv@v6
+        if: matrix.stack == 'python'
+      - name: the stack's own checks (Python)
+        if: matrix.stack == 'python'
+        working-directory: python
+        run: uv sync --frozen && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest -q
+      - run: npm ci
+        working-directory: conformance
+      - name: conformance
+        run: node conformance/run.ts ${{ matrix.stack }} --json report-${{ matrix.stack }}.json | tee report-${{ matrix.stack }}.txt
+      - name: report
+        if: always()
+        run: |
+          { echo '```'; cat report-${{ matrix.stack }}.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # A missing or short report is a failure too: the suite must have judged every rule, and none may fail or skip.
+          node -e '
+            const fs = require("fs"); const f = process.argv[1];
+            if (!fs.existsSync(f)) { console.error(`no ${f}: conformance never finished`); process.exit(1); }
+            const { rules } = JSON.parse(fs.readFileSync(f, "utf8"));
+            const by = (o) => rules.filter((r) => r.outcome === o).map((r) => r.id);
+            const [failed, skipped, passed] = [by("fail"), by("skip"), by("pass")];
+            console.log(`${rules.length} rules: ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped`);
+            if (failed.length || skipped.length || passed.length < 60) { console.error(`failed: ${failed} skipped: ${skipped}`); process.exit(1); }
+          ' report-${{ matrix.stack }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-${{ matrix.stack }}
+          path: report-${{ matrix.stack }}.*
