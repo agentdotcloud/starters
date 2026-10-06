@@ -5,18 +5,20 @@ export interface Ran { code: number; stdout: string; stderr: string }
 
 export function run(cmd: string, args: string[], opts: { input?: string; cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<Ran> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const piped = opts.input !== undefined;
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout!.on('data', (d) => { stdout += d; });
+    child.stderr!.on('data', (d) => { stderr += d; });
     const timer = opts.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : null;
     child.on('error', reject);
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       resolve({ code: code ?? 1, stdout, stderr });
     });
-    child.stdin.end(opts.input ?? '');
+    // A child can exit before it reads its input (EPIPE): its exit code and stderr already say why, so don't crash on it.
+    if (piped) child.stdin!.on('error', () => {}).end(opts.input);
   });
 }
 

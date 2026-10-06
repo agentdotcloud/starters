@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# GitHub's default `bash -e` has no pipefail, so `run.ts | tee` would pass with tee's exit code. This turns it on.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   suite:
     name: the suite's own tests
@@ -54,6 +59,16 @@ jobs:
         if: always()
         run: |
           { echo '```'; cat report-${{ matrix.stack }}.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # A missing or short report is a failure too: the suite must have judged every rule, and none may fail or skip.
+          node -e '
+            const fs = require("fs"); const f = process.argv[1];
+            if (!fs.existsSync(f)) { console.error(`no ${f}: conformance never finished`); process.exit(1); }
+            const { rules } = JSON.parse(fs.readFileSync(f, "utf8"));
+            const by = (o) => rules.filter((r) => r.outcome === o).map((r) => r.id);
+            const [failed, skipped, passed] = [by("fail"), by("skip"), by("pass")];
+            console.log(`${rules.length} rules: ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped`);
+            if (failed.length || skipped.length || passed.length < 60) { console.error(`failed: ${failed} skipped: ${skipped}`); process.exit(1); }
+          ' report-${{ matrix.stack }}.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
