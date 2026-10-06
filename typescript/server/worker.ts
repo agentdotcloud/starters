@@ -5,11 +5,12 @@
 // With nothing to do it backs off (10 s, 20 s, 40 s … up to 10 minutes) and holds no database connection between polls,
 // so the database can go to sleep. The first email after a quiet spell can take a few minutes: that's the price of not
 // paying for an always-awake database.
+import pg from 'pg';
 import { pool } from './db.ts';
 import { required } from './env.ts';
 import { event, log } from './log.ts';
 
-const { AGC_EMAIL_URL, AGC_EMAIL_TOKEN } = required('AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN');
+const { DATABASE_URL, AGC_EMAIL_URL, AGC_EMAIL_TOKEN } = required('DATABASE_URL', 'AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN');
 const POLL_S = Number(process.env.WORKER_POLL_SECONDS ?? 10);
 const IDLE_MAX_S = Number(process.env.WORKER_IDLE_MAX_SECONDS ?? 600);
 interface Job { id: string; kind: string; payload: Record<string, unknown>; attempts: number }
@@ -37,8 +38,20 @@ const handlers: Record<string, (job: Job) => Promise<void>> = {
 };
 
 // Claims one job: due, not done, and not held by a live lease. SKIP LOCKED lets workers claim side by side.
+// Each poll opens its own connection and closes it straight after, so an idle worker holds none between polls (the
+// pool would keep one for its idle timeout).
 async function claim(): Promise<Job | null> {
-  const { rows } = await pool.query<Job>(`
+  const db = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 10_000 });
+  await db.connect();
+  try {
+    return await claimWith(db);
+  } finally {
+    await db.end().catch(() => {});
+  }
+}
+
+async function claimWith(db: pg.Client): Promise<Job | null> {
+  const { rows } = await db.query<Job>(`
     UPDATE jobs SET locked_until = now() + interval '60 seconds', attempts = attempts + 1
      WHERE id = (SELECT id FROM jobs WHERE done_at IS NULL AND run_at <= now() AND (locked_until IS NULL OR locked_until < now())
                  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
