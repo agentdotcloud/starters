@@ -15,6 +15,7 @@ dev     = "uv run watchfiles 'python -m app.worker' app"
 [data.db]
 env        = "DATABASE_URL"
 migrations = "migrations/"
+seed       = "seed.sql"          # a demo person and three notes for a mirror that starts empty; never run in production
 
 [[check.smoke]]
 name  = "one note per title, even when racing"

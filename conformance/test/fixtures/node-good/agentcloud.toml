@@ -13,6 +13,7 @@ dev = "node --watch server/worker.ts"
 [data.db]
 env = "DATABASE_URL"
 migrations = "migrations/"
+seed = "seed.sql"
 
 [[check.smoke]]
 name  = "one note per title, even when racing"

@@ -34,6 +34,9 @@ test('the fixture passes every lint rule', async () => {
 });
 
 test('each broken copy fails the rule it breaks', async () => {
+  assert.equal(outcome('LINT:seed', await broken((d) => rmSync(join(d, 'seed.sql')))), 'fail', 'seed declared but missing');
+  assert.equal(outcome('LINT:seed', await broken((d) => writeFileSync(join(d, 'seed.sql'), readFileSync(join(GOOD, 'seed.sql'), 'utf8').replace(/ON CONFLICT DO NOTHING;\s*$/, ';')))), 'fail', 'an insert without ON CONFLICT');
+  assert.equal(outcome('LINT:seed', await broken((d) => writeFileSync(join(d, 'seed.sql'), 'CREATE TABLE extra (id int);\n' + readFileSync(join(GOOD, 'seed.sql'), 'utf8')))), 'fail', 'DDL in a seed');
   assert.equal(outcome('LINT:no-dockerfile', await broken((d) => writeFileSync(join(d, 'Dockerfile'), 'FROM node:24\n'))), 'fail');
   assert.equal(outcome('LINT:no-passwords', await broken((d) => writeFileSync(join(d, 'server', 'auth.ts'), "import bcrypt from 'bcrypt';\nexport const check = (password: string) => bcrypt.compare(password, '');\n"))), 'fail');
   assert.equal(outcome('LINT:no-cors', await broken((d) => writeFileSync(join(d, 'server', 'cors.ts'), "import { cors } from 'hono/cors';\n"))), 'fail');

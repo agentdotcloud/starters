@@ -194,4 +194,29 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!s.descriptor.setup) problems.push('[dev] setup is missing');
     return problems.length ? fail(problems.join('; ')) : pass('every reload probe names one exact spot');
   },
+  // APP-6: a small seed for mirrors that start empty: declared, present, inserts only (no DDL), into tables the
+  // migrations create, every insert ON CONFLICT DO NOTHING, under 200 lines.
+  'LINT:seed': (s) => {
+    const declared = table(table(s.raw.data).db).seed;
+    if (declared !== 'seed.sql') return fail(`[data.db] seed = ${JSON.stringify(declared ?? null)}; the starter declares seed = "seed.sql"`);
+    if (!existsSync(join(s.dir, 'seed.sql'))) return fail('seed.sql is declared but missing');
+    const sql = read(s, 'seed.sql');
+    const lines = sql.split('\n').length;
+    const ddl = sql.match(/\b(create|alter|drop|truncate)\s+(table|index|type|schema|function|extension|view|sequence)\b/i);
+    const known = tables(s);
+    const inserts = [...sql.matchAll(/insert\s+into\s+(?:public\.)?"?(\w+)"?/gi)].map((m) => m[1]!.toLowerCase());
+    const unknown = inserts.filter((t) => !known.has(t));
+    const statements = sql.split(';').filter((x) => /\S/.test(x.replace(/--[^\n]*/g, '')));
+    const insertsWithoutConflict = statements.filter((x) => /insert\s+into/i.test(x) && !/on\s+conflict\s+do\s+nothing/i.test(x)).length;
+    const demo = /demo@example\.test/.test(sql) && /Demo Person/.test(sql);
+    const problems = [
+      lines >= 200 ? `${lines} lines (under 200)` : '',
+      ddl ? `DDL in a seed: ${ddl[0]}` : '',
+      unknown.length ? `inserts into tables no migration creates: ${unknown.join(', ')}` : '',
+      insertsWithoutConflict ? `${insertsWithoutConflict} insert(s) without ON CONFLICT DO NOTHING` : '',
+      inserts.length === 0 ? 'no INSERT at all' : '',
+      demo ? '' : 'no demo@example.test / Demo Person',
+    ].filter(Boolean);
+    return (problems.length ? fail : pass)(problems.length ? problems.join('; ') : `${inserts.length} inserts into ${[...new Set(inserts)].join(', ')}, all ON CONFLICT DO NOTHING, ${lines} lines`);
+  },
 };

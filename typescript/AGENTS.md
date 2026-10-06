@@ -22,6 +22,7 @@ server/log.ts       JSON logs, and event() for workflow steps
 server/main.ts      production: the API plus web/dist          server/dev.ts  development: the API plus Vite
 web/src/            the UI (App.tsx, api.ts)
 migrations/         schema changes, as plain SQL (agc migration new <slug>)
+seed.sql            a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```
 
 ## How to add things

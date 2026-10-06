@@ -25,6 +25,7 @@ app/__main__.py    starts uvicorn on 0.0.0.0:$PORT (python -m app)
 dev.sh             agc up's dev command: uvicorn --reload behind Vite
 web/src/           the UI (App.tsx, api.ts)
 migrations/        schema changes, as plain SQL (agc migration new <slug>)
+seed.sql           a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```
 
 ## How to add things

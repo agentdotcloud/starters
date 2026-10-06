@@ -1,6 +1,8 @@
 // The black-box rules (CONF:*): the stack's image, built as agent.cloud would build it, run against the fake platform
 // and probed over HTTP, signals, logs and SQL. One scenario, in order, since later tests reuse what earlier ones made.
 import { randomBytes } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { checkSignInState, invariantResult, readChecks, runFlow } from '../vendor/agc/checks.ts';
 import { AUTH_TOKEN, type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, verdict, type TestResult } from '../lib/report.ts';
@@ -19,7 +21,7 @@ export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
-  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app',
+  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app', 'CONF:seed',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -53,6 +55,13 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     await env.startPlatform();
     const applied = await env.migrate();
     opts.log(`applied ${applied.length} migrations`);
+    // APP-6: the seed, after the migrations, as agc up runs it on a mirror that starts empty.
+    const seedPath = join(stack.dir, 'seed.sql');
+    const seedSql = existsSync(seedPath) ? readFileSync(seedPath, 'utf8') : null;
+    const applySeed = async () => { const d = env.db(); await d.connect(); try { await d.query(`BEGIN;\n${seedSql}\nCOMMIT;`); } finally { await d.end(); } };
+    let seedError: string | null = null;
+    if (seedSql) await applySeed().catch((e) => { seedError = (e as Error).message; });
+    const demoId = seedSql?.match(/'([0-9a-f-]{36})'/i)?.[1] ?? null;
     const schemaBefore = await schema(env);
 
     // PROC-9: a missing variable stops the process quickly, and says which.
@@ -221,6 +230,25 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const after = await req(env, web, jar, 'GET', '/api/notes');
       const madeIt = Array.isArray(after.json) && (after.json as { title?: string }[]).some((n) => n.title === title);
       set('CONF:csrf-json', (form.status === 415 && !madeIt ? pass : fail)(`a form post answered ${form.status}${madeIt ? ' and created a note' : ', nothing created'}`));
+    }
+
+    // APP-6: the demo person sees exactly the seeded notes, and the seed is idempotent.
+    {
+      if (!seedSql) set('CONF:seed', fail('no seed.sql'));
+      else if (seedError) set('CONF:seed', fail(`seed.sql failed after the migrations: ${seedError}`));
+      else if (!demoId) set('CONF:seed', fail('seed.sql names no uuid for the demo person'));
+      else {
+        const expected = (await env.sql<{ title: string }>('SELECT title FROM notes WHERE user_id = $1 ORDER BY title', [demoId])).map((r) => r.title);
+        const demo: Jar = new Map();
+        const s = await signIn(env, web, demo, demoId);
+        const list = await req(env, web, demo, 'GET', '/api/notes');
+        const got = (Array.isArray(list.json) ? list.json as { title?: string }[] : []).map((n) => n.title ?? '').sort();
+        const [{ n: before }] = await env.sql<{ n: string }>('SELECT count(*) AS n FROM notes');
+        await applySeed().catch((e) => { seedError = (e as Error).message; });
+        const [{ n: again }] = await env.sql<{ n: string }>('SELECT count(*) AS n FROM notes');
+        const ok = !s.problem && list.status === 200 && expected.length === 3 && JSON.stringify(got) === JSON.stringify(expected) && !seedError && before === again;
+        set('CONF:seed', (ok ? pass : fail)(s.problem ?? `signed in as the demo id: GET /api/notes ${list.status} with ${got.length} notes (${expected.length} seeded)${JSON.stringify(got) === JSON.stringify(expected) ? ', the seeded ones' : ', not the seeded ones'}; applied twice: ${before} then ${again} notes${seedError ? `; second apply failed: ${seedError}` : ''}`));
+      }
     }
 
     // MAIL-1, APP-4: the worker emails the person, keyed by the note.
