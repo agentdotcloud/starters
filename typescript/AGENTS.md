@@ -34,6 +34,6 @@ migrations/         schema changes, as plain SQL (agc migration new <slug>)
 ## Rules this stack keeps
 
 - Health (`/api/health`) never touches the database. agent.cloud asks it every 2 seconds.
-- Sign-in checks `state` before trading the code. Sessions last a day.
+- Sign-in checks `state` before trading the code. Sessions last a day. Cookies are `__Host-` cookies outside a mirror: apps share the agent.cloud site, and the prefix stops a neighbour app from planting one. Any cookie you add keeps that rule (`Secure`, `Path=/`, no `Domain`).
 - On SIGTERM, web and the worker finish what's in flight and exit.
 - Nothing writes inside the app's folder. Use `/tmp`, or better, the database.

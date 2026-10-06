@@ -72,6 +72,7 @@ app.post('/api/notes', async (c) => {
 if (process.env.AGENTCLOUD_CONFORMANCE === '1') {
   app.get('/api/debug/error', () => { throw new Error('a deliberate failure, for the conformance suite'); });
   app.get('/api/debug/slow', async (c) => {
+    log.info('slow request started');
     await new Promise((r) => setTimeout(r, Math.min(Number(c.req.query('ms')) || 0, 10_000)));
     return c.json({ ok: true });
   });

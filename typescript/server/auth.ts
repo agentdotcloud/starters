@@ -11,8 +11,10 @@ import { onMirror, required } from './env.ts';
 import { log } from './log.ts';
 
 const { AGC_AUTH_URL, AGC_AUTH_TOKEN } = required('AGC_AUTH_URL', 'AGC_AUTH_TOKEN');
-const STATE = 'auth_state';
-const SESSION = 'session';
+// __Host- cookies outside a mirror: apps share the agent.cloud site, and only this app's own host can set one, so a
+// neighbour app can't plant a session or a sign-in state here. On a mirror (plain http) the prefix isn't allowed.
+const STATE = onMirror ? 'auth_state' : '__Host-auth_state';
+const SESSION = onMirror ? 'session' : '__Host-session';
 const DAY = 86_400;
 
 export interface User { id: string; email: string | null; name: string | null }
@@ -45,7 +47,7 @@ export function signIn(app: Hono<Env>) {
     // State first: it's what stops someone else's code from signing this person in to the wrong account.
     const expected = getCookie(c, STATE) ?? '';
     const state = c.req.query('state') ?? '';
-    deleteCookie(c, STATE, { path: '/' });
+    deleteCookie(c, STATE, { path: '/', secure: !onMirror });
     if (!expected || !same(state, expected)) return c.text('Sign-in expired. Try again.', 400);
     const res = await fetch(`${AGC_AUTH_URL}/token`, {
       method: 'POST', signal: AbortSignal.timeout(10_000),
@@ -71,7 +73,7 @@ export function signIn(app: Hono<Env>) {
   app.post('/auth/sign-out', async (c: Context<Env>) => {
     const token = getCookie(c, SESSION);
     if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
-    deleteCookie(c, SESSION, { path: '/' });
+    deleteCookie(c, SESSION, { path: '/', secure: !onMirror });
     return c.json({ ok: true });
   });
 }
