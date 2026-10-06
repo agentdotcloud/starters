@@ -50,6 +50,7 @@ export class Env {
       AGC_EMAIL_URL: `${PLATFORM}/email/v1/messages`, AGC_EMAIL_TOKEN: EMAIL_TOKEN,
       AGC_AUTH_URL: this.authUrl, AGC_AUTH_TOKEN: AUTH_TOKEN,
       AGENTCLOUD_CONFORMANCE: '1',
+      WORKER_POLL_SECONDS: '0.5', WORKER_IDLE_MAX_SECONDS: '4', // JOB-4, scaled down so no test waits out a long sleep
       ...extra,
     };
   }
@@ -106,7 +107,8 @@ export class Env {
       '-e', 'POSTGRES_USER=app', '-e', `POSTGRES_PASSWORD=${this.password}`, '-e', 'POSTGRES_DB=app',
       '-v', `${this.tmp}:/in:ro`, '--entrypoint', 'sh', 'postgres:18', '-c',
       'mkdir -p /tls && cp /in/server.crt /in/server.key /in/pg_hba.conf /tls/ && chown postgres:postgres /tls/* && chmod 600 /tls/server.key && '
-      + 'exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c hba_file=/tls/pg_hba.conf']);
+      + 'exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c hba_file=/tls/pg_hba.conf '
+      + '-c log_statement=all -c log_connections=on']); // every statement, timestamped: how JOB-4\'s polling is timed
     const fp = `platform-${this.id}`;
     this.containers.push(fp);
     await this.docker(['run', '-d', '--name', fp, '--network', this.net, '--network-alias', 'platform', '-p', '127.0.0.1::8099',
@@ -213,6 +215,15 @@ export class Env {
     await run('docker', ['stop', '-t', String(graceSeconds), c.name], { timeoutMs: (graceSeconds + 30) * 1000 });
     const s = await this.inspect(c);
     return { seconds: (Date.now() - t0) / 1000, exitCode: s.exitCode };
+  }
+  // When the worker ran its claim (JOB-2's SKIP LOCKED query), from the database's own statement log.
+  async claims(since = 0): Promise<number[]> {
+    const r = await run('docker', ['logs', `db-${this.id}`]);
+    return `${r.stdout}${r.stderr}`.split('\n').filter((l) => /statement:/.test(l) && /SKIP LOCKED/i.test(l))
+      .map((l) => Date.parse(l.slice(0, 23).replace(' ', 'T') + 'Z')).filter((t) => Number.isFinite(t) && t >= since);
+  }
+  async ipOf(c: Container): Promise<string> {
+    return (await run('docker', ['inspect', '-f', `{{(index .NetworkSettings.Networks "${this.net}").IPAddress}}`, c.name])).stdout.trim();
   }
   async kill(c: Container) { await run('docker', ['kill', c.name]); }
   async start(c: Container) { await this.docker(['start', c.name]); }

@@ -18,7 +18,7 @@ const tag = () => randomBytes(4).toString('hex');
 export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
-  'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:logs-json', 'CONF:error-log',
+  'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app',
 ] as const;
 
@@ -310,6 +310,31 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const perNote = ids.map((id) => m.filter((x) => x.key.startsWith(`note-${id}`)).length);
       const ok = ids.length === 5 && !!all && perNote.every((n) => n === 1);
       set('CONF:mail-once', (ok ? pass : fail)(`${ids.length} notes; emails per note after the crash: ${perNote.join(', ')}${all ? '' : ' (not all arrived within 90 s)'}`));
+    }
+
+    // JOB-4: an idle worker backs off and holds no connection between polls; a new job brings it back.
+    {
+      await sleep(8000); // quiet: the gaps should have grown to the 4 s ceiling
+      const ip = await env.ipOf(worker);
+      const held: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        held.push(Number((await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM pg_stat_activity WHERE client_addr = $1::inet', [ip]))[0]!.n));
+        await sleep(500);
+      }
+      const idleFrom = Date.now() - 14_000;
+      const idle = await env.claims(idleFrom);
+      const gaps = idle.slice(1).map((t, i) => (t - idle[i]!) / 1000);
+      const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Idle ${tag()}` });
+      const id = (r.json as { id?: string } | null)?.id ?? '';
+      const t0 = Date.now();
+      const got = await until(15_000, async () => ((await env.mail()).some((m) => m.key === `note-${id}/created`) ? Date.now() : undefined), 200);
+      await sleep(2000);
+      const after = await env.claims(t0);
+      const fast = after.slice(1).map((t, i) => (t - after[i]!) / 1000).filter((g) => g < 1.5).length;
+      const grew = gaps.length >= 2 && Math.max(...gaps) >= 3 && Math.max(...gaps) <= 6;
+      const quiet = held.filter((n) => n === 0).length >= 9;
+      const ok = grew && quiet && !!got && fast >= 1;
+      set('CONF:jobs-idle', (ok ? pass : fail)(`idle gaps between claims: ${gaps.map((g) => g.toFixed(1)).join(', ') || 'none seen'} s (should grow to about 4); worker connections in ${held.filter((n) => n === 0).length} of 12 idle samples: none; a new job emailed ${got ? `${((got - t0) / 1000).toFixed(1)} s` : 'never'} after it was created, then ${fast} quick polls`));
     }
 
     // OBS-3: workflow events for each note, well-formed.

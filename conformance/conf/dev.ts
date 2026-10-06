@@ -79,9 +79,9 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
     const session = got.callback?.cookies.map(cookieAttrs).find((c) => c.value && c.httpOnly && !/state/i.test(c.name));
     out.set('CONF:cookies', session ? (!session.secure ? pass : fail)(`on a mirror the session cookie ${session.secure ? 'still has' : 'drops'} Secure`) : fail(got.problem ?? 'no session cookie on the mirror'));
 
-    // DEV-2, DEV-3
-    out.set('CONF:reload-api', await reloadHttp(env, web, d.reload.api));
+    // DEV-3, then DEV-2: a server save may restart the whole dev process, so the UI's turn comes first.
     out.set('CONF:reload-ui', await reloadHttp(env, web, d.reload.ui));
+    out.set('CONF:reload-api', await reloadHttp(env, web, d.reload.api));
   }
 
   // DEV-4: the worker restarts on save.
