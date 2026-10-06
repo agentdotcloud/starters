@@ -1,0 +1,84 @@
+// Background work: jobs from the `jobs` table, claimed with a lease (AGENTS.md "Background work"). A job a dead worker
+// held runs again once its lease lapses, so every job is safe to run twice: emails carry a key that names the message,
+// and agent.cloud sends each key once. On SIGTERM the worker finishes the job in hand and exits.
+//
+// With nothing to do it backs off (10 s, 20 s, 40 s … up to 10 minutes) and holds no database connection between polls,
+// so the database can go to sleep. The first email after a quiet spell can take a few minutes: that's the price of not
+// paying for an always-awake database.
+import { pool } from './db.ts';
+import { required } from './env.ts';
+import { event, log } from './log.ts';
+
+const { AGC_EMAIL_URL, AGC_EMAIL_TOKEN } = required('AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN');
+const POLL_S = Number(process.env.WORKER_POLL_SECONDS ?? 10);
+const IDLE_MAX_S = Number(process.env.WORKER_IDLE_MAX_SECONDS ?? 600);
+interface Job { id: string; kind: string; payload: Record<string, unknown>; attempts: number }
+
+let stopping = false;
+let wake: () => void = () => {};
+
+const handlers: Record<string, (job: Job) => Promise<void>> = {
+  async note_email(job) {
+    const { rows } = await pool.query<{ id: string; title: string; email: string | null }>(
+      'SELECT n.id, n.title, u.email FROM notes n JOIN users u ON u.id = n.user_id WHERE n.id = $1', [job.payload.note_id]);
+    const note = rows[0];
+    if (!note) return; // deleted since: nothing to say
+    if (note.email) {
+      const res = await fetch(AGC_EMAIL_URL, {
+        method: 'POST', signal: AbortSignal.timeout(15_000),
+        headers: { authorization: `Bearer ${AGC_EMAIL_TOKEN}`, 'content-type': 'application/json' },
+        // The key names this message for good, so a retried job never emails twice.
+        body: JSON.stringify({ to: note.email, subject: `New note: ${note.title}`, text: `You added a note: ${note.title}`, key: `note-${note.id}/created` }),
+      });
+      if (!res.ok) throw new Error(`the email service answered ${res.status}`);
+    }
+    event('note.emailed', `note:${note.id}`, { attrs: { sent: Boolean(note.email) } });
+  },
+};
+
+// Claims one job: due, not done, and not held by a live lease. SKIP LOCKED lets workers claim side by side.
+async function claim(): Promise<Job | null> {
+  const { rows } = await pool.query<Job>(`
+    UPDATE jobs SET locked_until = now() + interval '60 seconds', attempts = attempts + 1
+     WHERE id = (SELECT id FROM jobs WHERE done_at IS NULL AND run_at <= now() AND (locked_until IS NULL OR locked_until < now())
+                 ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+    RETURNING id, kind, payload, attempts`);
+  return rows[0] ?? null;
+}
+
+async function work(job: Job) {
+  try {
+    const handler = handlers[job.kind];
+    if (!handler) throw new Error(`no handler for ${job.kind}`);
+    await handler(job);
+    await pool.query('UPDATE jobs SET done_at = now(), locked_until = NULL, last_error = NULL WHERE id = $1', [job.id]);
+  } catch (e) {
+    // Try again later, backing off; the error is kept on the job, not logged with its data.
+    const delay = Math.min(2 ** job.attempts, 3600);
+    await pool.query(`UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => $2), last_error = $3 WHERE id = $1`,
+      [job.id, delay, (e as Error).message.slice(0, 500)]);
+    log.warn('job failed', { job: job.id, kind: job.kind, attempts: job.attempts, retry_in_s: delay });
+  }
+}
+
+async function main() {
+  log.info('worker ready');
+  let wait = POLL_S;
+  while (!stopping) {
+    const job = await claim().catch((e) => { log.warn('couldn’t claim a job', { error: (e as Error).message }); return null; });
+    if (job) {
+      await work(job);
+      wait = POLL_S; // busy again: back to the short interval
+      continue;
+    }
+    await new Promise<void>((r) => { const t = setTimeout(r, wait * 1000); wake = () => { clearTimeout(t); r(); }; });
+    wait = Math.min(wait * 2, IDLE_MAX_S);
+  }
+  await pool.end().catch(() => {});
+  log.info('worker stopped');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => { stopping = true; wake(); });
+process.on('SIGINT', () => { stopping = true; wake(); });
+void main();

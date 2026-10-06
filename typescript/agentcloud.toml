@@ -1,0 +1,29 @@
+# agent.cloud runs this app. `agc init` sets the name; see AGENTS.md for how to work on it.
+[app]
+name = "starter"
+
+[service.web]
+port   = 8080
+dev    = "npm run dev"          # agc up: the API and the UI on one port, reloading on save
+health = "/api/health"
+# no `command`: agent.cloud's Node image runs `npm start`
+
+[service.worker]
+command = "node server/worker.ts"
+dev     = "npm run worker:dev"
+
+[data.db]
+env        = "DATABASE_URL"
+migrations = "migrations/"
+
+[[check.smoke]]
+name  = "one note per title, even when racing"
+steps = [
+  "SIGN IN racer-{run}@example.test",
+  "POST /api/notes {title: 'Hello {run}'} -> 201|409 x10",
+  "GET /api/notes -> 200",
+]
+
+[[check.invariant]]
+name = "a title once per person"
+sql  = "SELECT user_id, title FROM notes GROUP BY user_id, title HAVING count(*) > 1"
