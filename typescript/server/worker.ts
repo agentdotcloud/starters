@@ -55,8 +55,14 @@ async function work(job: Job) {
   } catch (e) {
     // Try again later, backing off; the error is kept on the job, not logged with its data.
     const delay = Math.min(2 ** job.attempts, 3600);
-    await pool.query(`UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => $2), last_error = $3 WHERE id = $1`,
-      [job.id, delay, (e as Error).message.slice(0, 500)]);
+    try {
+      await pool.query(`UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => $2), last_error = $3 WHERE id = $1`,
+        [job.id, delay, (e as Error).message.slice(0, 500)]);
+    } catch (db) {
+      // The database is gone too: the job's lease runs out and it's claimed again, so nothing is lost.
+      log.warn('couldn\u2019t record a failed job', { job: job.id, error: (db as Error).message });
+      return;
+    }
     log.warn('job failed', { job: job.id, kind: job.kind, attempts: job.attempts, retry_in_s: delay });
   }
 }

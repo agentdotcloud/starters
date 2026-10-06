@@ -179,7 +179,13 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     // AUTH-2: the platform's own state probe.
     {
       const r = await checkSignInState(env.base(web), { url: env.authUrl, token: AUTH_TOKEN }, env.fetchFor(web));
-      set('CONF:signin-state', r === null ? fail('the probe couldn\u2019t start a sign-in at /auth/sign-in') : (r.ok ? pass : fail)(r.detail));
+      // A crafted state (non-ASCII, a different byte length) is a mismatch like any other: 400, never a 500.
+      const sj: Jar = new Map();
+      await req(env, web, sj, 'GET', '/auth/sign-in');
+      const odd = await req(env, web, sj, 'GET', `/auth/callback?code=x&state=${encodeURIComponent('\u00e9')}`);
+      const ok = r !== null && r.ok && odd.status === 400;
+      set('CONF:signin-state', r === null ? fail('the probe couldn\u2019t start a sign-in at /auth/sign-in')
+        : (ok ? pass : fail)(`${r.detail}; a non-ASCII state answered ${odd.status}`));
     }
 
     // APP-2, APP-3: the notes API.
