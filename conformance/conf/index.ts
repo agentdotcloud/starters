@@ -154,9 +154,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const id = user?.user?.id ?? user?.id ?? '';
       const auth3 = me.status === 200 && UUID.test(id);
       const sessionLine = got.callback?.cookies.map(cookieAttrs).find((c) => c.value && c.name !== stateCookie?.name) ?? null;
-      const out1 = await req(env, web, new Map(jar), 'POST', '/auth/sign-out', {});
-      const outJar: Jar = new Map(jar);
-      await req(env, web, outJar, 'POST', '/auth/sign-out', {});
+      // Sign-out on a session of its own, so the one signed in above stays live for the tests after this.
+      const outJar: Jar = new Map();
+      await signIn(env, web, outJar, `signout-${tag()}@example.test`);
+      const out1 = await req(env, web, outJar, 'POST', '/auth/sign-out', {});
       const after = await req(env, web, outJar, 'GET', '/api/me');
       const auth5 = before.status === 401 && me.status === 200 && after.status === 401 && out1.status < 400;
       set('CONF:signin', (auth1 && auth3 && auth5 ? pass : fail)(got.problem ?? `signed in as ${who}: /api/me ${me.status}`, {
@@ -218,8 +219,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         return created.every((id) => m.some((x) => x.key === `note-${id}/created`)) ? m : undefined;
       }, 500);
       const mine = (got ?? await env.mail()).filter((m) => created.some((id) => m.key.startsWith(`note-${id}`)));
-      const ok = !!got && mine.every((m) => m.to === who && m.subject.trim() && m.text.trim());
-      set('CONF:mail', (ok ? pass : fail)(got ? `${mine.length} emails to the person, keyed note-<id>/created` : `after 20 s the fake platform had ${mine.length} of ${created.length} emails (keys seen: ${(await env.mail()).map((m) => m.key).slice(0, 5).join(', ') || 'none'})`));
+      const ok = created.length > 0 && !!got && mine.length === created.length && mine.every((m) => m.to === who && m.subject.trim() && m.text.trim());
+      set('CONF:mail', (ok ? pass : fail)(!created.length ? 'no notes were created to email about (see CONF:app)' : got ? `${mine.length} emails to the person, keyed note-<id>/created` : `after 20 s the fake platform had ${mine.length} of ${created.length} emails (keys seen: ${(await env.mail()).map((m) => m.key).slice(0, 5).join(', ') || 'none'})`));
     }
 
     // OBS-2: an error is one JSON line at level error, and the response hides the stack.
@@ -279,7 +280,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       }, 500);
       const mine = (all ?? await env.mail()).filter((m) => ids.some((id) => m.key === `note-${id}/created`));
       const twice = mine.filter((m) => m.attempts > 1);
-      set('CONF:jobs-race', (!!all && ids.length === 20 && !twice.length ? pass : fail)(`${ids.length} notes, ${mine.length} emails, ${twice.length} sent more than once, with two workers`));
+      set('CONF:jobs-race', (!!all && ids.length === 20 && mine.length === 20 && !twice.length ? pass : fail)(`${ids.length} notes, ${mine.length} emails, ${twice.length} sent more than once, with two workers`));
       await env.stop(second, 60);
     }
 
@@ -302,7 +303,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       }, 1000);
       const m = all ?? await env.mail();
       const perNote = ids.map((id) => m.filter((x) => x.key.startsWith(`note-${id}`)).length);
-      const ok = !!all && perNote.every((n) => n === 1);
+      const ok = ids.length === 5 && !!all && perNote.every((n) => n === 1);
       set('CONF:mail-once', (ok ? pass : fail)(`${ids.length} notes; emails per note after the crash: ${perNote.join(', ')}${all ? '' : ' (not all arrived within 90 s)'}`));
     }
 
@@ -311,7 +312,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const lines = (await Promise.all(allLogs.map((c) => env.logs(c)))).flat().map(parse).filter((j) => j?.agc === 'event') as Record<string, unknown>[];
       const bad = lines.filter((e) => !NAME.test(String(e.name ?? '')) || !ENTITY.test(String(e.entity ?? '')) || (e.related !== undefined && (!Array.isArray(e.related) || e.related.some((r) => !ENTITY.test(String(r))))));
       const has = (name: string, id: string) => lines.some((e) => e.name === name && e.entity === `note:${id}`);
-      const createdOk = created.every((id) => has('note.created', id));
+      const createdOk = created.length > 0 && created.every((id) => has('note.created', id));
       const emailedOk = created.every((id) => has('note.emailed', id));
       set('CONF:events', (createdOk && emailedOk && !bad.length ? pass : fail)(`${lines.length} events; note.created for each note: ${createdOk}; note.emailed: ${emailedOk}; malformed: ${bad.length}`));
     }
@@ -365,9 +366,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
 
     // OBS-1, OBS-5: JSON lines with a level.
     {
-      const logs = (await Promise.all(allLogs.map((c) => env.logs(c)))).flat();
+      // Workflow events go to observability's events, not its logs, so they aren't counted here.
+      const logs = (await Promise.all(allLogs.map((c) => env.logs(c)))).flat().filter((l) => parse(l)?.agc !== 'event');
       const parsed = logs.map(parse);
-      const good = parsed.filter((j) => j && typeof (j.level ?? j.severity ?? j.lvl) === 'string' && LEVELS.has(String(j.level ?? j.severity ?? j.lvl).toLowerCase()) && (typeof j.msg === 'string' || typeof j.message === 'string' || j.agc === 'event'));
+      const good = parsed.filter((j) => j && typeof (j.level ?? j.severity ?? j.lvl) === 'string' && LEVELS.has(String(j.level ?? j.severity ?? j.lvl).toLowerCase()) && (typeof j.msg === 'string' || typeof j.message === 'string'));
       const share = logs.length ? good.length / logs.length : 1;
       const access = logs.filter((l) => /\b(GET|POST|PUT|PATCH|DELETE) \/\S*.{0,40}\b[1-5]\d\d\b/.test(l));
       const odd = logs.filter((l, i) => !good.includes(parsed[i]!)).slice(0, 3).map((l) => l.slice(0, 100));
