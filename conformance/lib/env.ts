@@ -219,8 +219,13 @@ export class Env {
   // When the worker ran its claim (JOB-2's SKIP LOCKED query), from the database's own statement log.
   async claims(since = 0): Promise<number[]> {
     const r = await run('docker', ['logs', `db-${this.id}`]);
-    return `${r.stdout}${r.stderr}`.split('\n').filter((l) => /statement:/.test(l) && /SKIP LOCKED/i.test(l))
-      .map((l) => Date.parse(l.slice(0, 23).replace(' ', 'T') + 'Z')).filter((t) => Number.isFinite(t) && t >= since);
+    // A statement's later lines arrive as tab-indented continuation lines; simple and extended protocol both count.
+    const statements: { at: number; text: string }[] = [];
+    for (const l of `${r.stdout}${r.stderr}`.split('\n')) {
+      if (/LOG:\s+(statement|execute [^:]*):/.test(l)) statements.push({ at: Date.parse(`${l.slice(0, 23).replace(' ', 'T')}Z`), text: l });
+      else if (l.startsWith('\t') && statements.length) statements[statements.length - 1]!.text += l;
+    }
+    return statements.filter((st) => /SKIP LOCKED/i.test(st.text) && Number.isFinite(st.at) && st.at >= since).map((st) => st.at);
   }
   async ipOf(c: Container): Promise<string> {
     return (await run('docker', ['inspect', '-f', `{{(index .NetworkSettings.Networks "${this.net}").IPAddress}}`, c.name])).stdout.trim();
