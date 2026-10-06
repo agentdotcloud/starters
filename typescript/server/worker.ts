@@ -42,6 +42,7 @@ const handlers: Record<string, (job: Job) => Promise<void>> = {
 // pool would keep one for its idle timeout).
 async function claim(): Promise<Job | null> {
   const db = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 10_000 });
+  db.on('error', () => {}); // a dropped connection also fails the query in hand, which main() logs; don't crash on it
   await db.connect();
   try {
     return await claimWith(db);
