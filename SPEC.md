@@ -35,8 +35,8 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **PROC-1:** `web` listens on `0.0.0.0:$PORT`, never `127.0.0.1` or a fixed port. `CONF:bind` (reached from another container)
 - **PROC-2:** One port serves both: the UI at `/` (HTML), and the API under `/api/`. An unknown `/api/...` path answers JSON 404; any other unknown path answers the UI's `index.html`, so client-side routes survive a reload. `CONF:routes`
 - **PROC-3:** `GET /api/health` answers 200 with JSON, no sign-in, within 30 s of the process starting (the platform waits up to 3 minutes: `release.ts` ready), and never touches the database. The platform probes it every 2 s for the life of the pod (`release.ts` readinessProbe), so a database query there would keep the database awake forever and turn a short database blip into a full outage. Database trouble shows as a 503 on the request that needs the database, and in the logs. `CONF:health` (it stays 200 with the fake database stopped)
-- **PROC-4:** On SIGTERM, `web` stops taking new connections, finishes requests in flight, and exits within 25 s with status 0. The platform gives web the Kubernetes default of 30 s before SIGKILL. `CONF:sigterm-web` (a request in flight when SIGTERM arrives still completes)
-- **PROC-5:** On SIGTERM, the worker finishes the job in hand, claims no new one, and exits within 50 s with status 0 (the worker's grace is 60 s: `terminationGracePeriodSeconds: 60`). `CONF:sigterm-worker`
+- **PROC-4:** On SIGTERM, `web` stops taking new connections, finishes requests in flight, and exits within 25 s with status 0 or 143 (128 + SIGTERM: uvicorn re-raises the signal after a graceful shutdown, and Kubernetes ignores the status after SIGTERM). The platform gives web 30 s before SIGKILL. `CONF:sigterm-web` (a `GET /api/debug/slow?ms=3000` in flight when SIGTERM arrives still completes)
+- **PROC-5:** On SIGTERM, the worker finishes the job in hand, claims no new one, and exits within 50 s with status 0 or 143 (the worker's grace is 60 s: `terminationGracePeriodSeconds: 60`). `CONF:sigterm-worker`
 - **PROC-6:** Signals reach the app through the platform's wrappers (`build.ts` forwarding and agc-start), so the app must not detach, fork into the background, or ignore SIGTERM. `CONF:sigterm-web`, `CONF:sigterm-worker` (run under the same wrapper)
 - **PROC-7:** `web` and the worker each stay under 256 MiB at rest, and under 512 MiB while the checks run. `CONF:memory` (containers capped at 512 MiB; an OOM fails it)
 - **PROC-8:** The app runs as the image's non-root user and writes only to `/tmp` and the database, never inside its own directory. `CONF:readonly` (the app directory is mounted read-only)
@@ -47,7 +47,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 `agc up` runs `[service.web] dev` and `[service.worker] dev` with the mirror's environment: `PORT`, `DATABASE_URL`, `AGC_*`, and `AGENTCLOUD_MIRROR` (`packages/cli/src/commands/mirror.ts`).
 
 - **DEV-1:** `dev` serves the whole app, UI and API, on `$PORT`. `CONF:dev-routes`
-- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. `CONF:reload-api`
+- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. The suite makes one untimed warm-up edit first (a first compile can be slow on a cold CI runner), then times the next one. `CONF:reload-api`
 - **DEV-3:** Saving a UI source file changes what the browser loads within 5 s (hot module reload, or the next page load), with no manual restart. `CONF:reload-ui`
 - **DEV-4:** Saving a worker source file restarts the worker within 5 s. `CONF:reload-worker`
 - **DEV-5:** `dev` needs nothing a fresh clone lacks beyond the language's toolchain: the first run installs dependencies itself, or the README says the one command that does. `CONF:dev-routes` (run from a clean copy)
@@ -57,7 +57,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 
 - **DATA-1:** The app connects with `DATABASE_URL` exactly as given (it carries `sslmode=verify-full`). It never sets its own host, user, password or TLS options. For libpq-based drivers the platform sets `PGSSLROOTCERT=system`. `CONF:db-tls` (the fake database only accepts verified TLS), `LINT:db-config`
 - **DATA-2:** The schema changes only through plain SQL files in `migrations/`, named `<digits>_<slug>.sql`, applied by `agc migrate` and recorded in `agentcloud_migrations` (`packages/cli/src/migrations.ts`). `LINT:migrations`
-- **DATA-3:** The app runs no DDL at runtime, and depends on no ORM migrator (Prisma Migrate, drizzle-kit, Knex migrations, TypeORM, Sequelize CLI, Alembic, Django migrations, yoyo). `LINT:no-migrator`, `CONF:no-ddl` (the schema is the same before and after the app runs)
+- **DATA-3:** The app runs no DDL at runtime, and depends on no ORM migrator (Prisma Migrate, drizzle-kit, Knex migrations, TypeORM, Sequelize CLI, Alembic, Django migrations, yoyo). `LINT:no-migrator`, `CONF:no-ddl` (Postgres's schema is the same before and after the app runs; DDL in an in-process store such as DuckDB is fine)
 - **DATA-4:** Users and entities are keyed on `uuid` columns. Masking keeps uuids and masks high-cardinality text (`packages/control/src/policy.ts`), so a mirror's rows still line up with production's ids. `LINT:uuid-keys`
 - **DATA-5:** The connection pool holds at most 10 connections per process. `review`
 - **DATA-6:** Queries are parameterized; no SQL is built from request input by string concatenation. `review`
@@ -81,11 +81,13 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **JOB-1:** A `jobs` table, created by a migration, with the columns in `docs/AGENTS.md`. Work is inserted in the same transaction as the write it belongs to. `LINT:migrations`, `review`
 - **JOB-2:** The worker claims with a lease (`FOR UPDATE SKIP LOCKED`, `locked_until`), so two workers never run one job at the same time, and a dead worker's job runs again. `CONF:jobs-race` (two workers, a batch of jobs, each email key exactly once)
 - **JOB-3:** Every job is safe to run twice. `CONF:mail-once`
+- **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. The trade-off is deliberate: the first email after a quiet spell can take up to ten minutes. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
 
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
 - **OBS-1:** Logs go to stdout and stderr as one JSON object per line, with `level` (`debug`, `info`, `warn`, `error`) and `msg`. The platform classifies by `level`; plain text falls back to keyword guessing. `CONF:logs-json` (at least 95% of lines parse, and every line from app code parses)
-- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`). That route answers 404 unless `AGENTCLOUD_CONFORMANCE=1`. `CONF:debug-route-hidden` (404 without the variable)
+- **OBS-2:** An unhandled error in a request is logged once, at `level: "error"`, on one line with the stack in a field. The request answers a JSON 500 without the stack. `CONF:error-log` (through `GET /api/debug/error`).
+- **OBS-6:** Two conformance-only routes, `GET /api/debug/error` (throws) and `GET /api/debug/slow?ms=N` (answers 200 after N ms, at most 10000), exist only when `AGENTCLOUD_CONFORMANCE=1`; otherwise both answer 404. The slow route logs `slow request started` (at info) as it begins, so the suite knows the request is in flight. `CONF:debug-route-hidden`
 - **OBS-3:** Business steps emit workflow events: `{"agc":"event","name","entity","related","status","attrs"}`, with `name` matching `^[a-z][a-z0-9_.-]{0,63}$` and `entity` and each `related` matching `^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_.-]{1,64}$`. The starter emits `note.created` and `note.emailed` with `note:<uuid>`. `CONF:events`
 - **OBS-4:** No personal data in logs or events: no emails, names or tokens, at any level. `CONF:no-pii` (a distinctive address signs in and creates notes; it never appears in any log line)
 - **OBS-5 (SHOULD):** No per-request access log at `info`: Traefik already records every request with its status and latency. `CONF:logs-json` (reported)
@@ -95,18 +97,74 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **CHK-1:** The manifest has at least one `[[check.smoke]]` flow that starts with `SIGN IN`, and one `[[check.invariant]]` paired with a smoke flow whose write step races (`xN`). `LINT:checks`
 - **CHK-2:** Every smoke flow passes against the built app on the fake platform, run by agc's own `runFlow`. `CONF:smoke`
 - **CHK-3:** Every invariant returns no rows after the smoke flows. `CONF:invariants`
-- **CHK-4:** Checks are safe to run on a branch of production: each smoke flow creates the data it needs (with `{run}` in anything that must be unique) and depends on no row existing beforehand, and every invariant holds on any real data, not only the starter's own. `CONF:smoke` (run twice against the same database, and once against a database seeded with unrelated rows), `review`
+- **CHK-4:** Checks are safe to run on a branch of production: each smoke flow creates the data it needs (with `{run}` in anything that must be unique) and depends on no row existing beforehand, and every invariant holds on any real data, not only the starter's own. `CONF:smoke` (every flow runs twice against the same database, so the second run meets the first run's rows), `review`
 
 ## 9. Security
 
 - **SEC-1:** No secrets in the repo: nothing matching agent.cloud's secret patterns (`packages/control/src/github.ts` secretIn), and no `.env` files. `LINT:secrets`
 - **SEC-2:** No CORS for credentialed requests, and nothing trusts an `Origin`, `Referer` or redirect target because it ends in `.agent.cloud`: apps are neighbours on the same site. Every state-changing route checks the session and takes no GETs. `LINT:no-cors`, `review`
+- **SEC-4:** Every state-changing route (`POST`, `PUT`, `PATCH`, `DELETE`) requires `Content-Type: application/json` and answers 415 otherwise. Apps on agent.cloud share a site, so `SameSite=Lax` cookies ride along on another app's form posts; a JSON body forces a CORS preflight, which SEC-2 never grants. `CONF:csrf-json` (a form post to `POST /api/notes` is refused and creates nothing)
+- **SEC-5:** Outside a mirror, every cookie the app sets has the `__Host-` prefix, `Secure`, `Path=/` and no `Domain`. Apps share the `agent.cloud` site, so a neighbour app could otherwise set a cookie for the whole domain with the same name: a planted `session` (session fixation) or a planted state (sign-in CSRF). `__Host-` cookies can only be set by the app's own host. On a mirror (DEV-6), where `Secure` is dropped, the plain names stay. `CONF:host-cookies`
 - **SEC-3 (SHOULD):** Responses carry `X-Content-Type-Options: nosniff`, and HTML responses a `frame-ancestors` CSP. `CONF:headers`
 
 ## 10. Documentation
 
 - **DOC-1:** `README.md` says what the starter is, the one command to run it locally, where the server, worker, UI, migrations and checks live, and how to add an API route and a job. `review`
-- **DOC-2:** `AGENTS.md` holds a stack section below agc's line (agc leaves everything below it alone): the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `LINT:agents-md`
+- **DOC-2:** `AGENTS.md` holds the stack section only: the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `agc init` appends agent.cloud's own section after it (`packages/cli/src/commands/init.ts` writeAgentsMd), so the starter's file must not contain agc's heading `# agent.cloud: how to work on this app`. `LINT:agents-md`
+
+## 11. The starter app
+
+Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it: people sign in, keep notes, and get an email for each note. These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the notes can go.
+
+- **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns. `LINT:migrations`
+- **APP-2:** `GET /api/notes` answers the signed-in person's notes, newest first, as `[{id, title, created_at}]`. Signed out, it answers 401. `CONF:app`
+- **APP-3:** `POST /api/notes {title}` answers 201 with the note. A missing or overlong title gets 400, a title the person already has gets 409, and signed out gets 401. In the same transaction it inserts a `note_email` job, and it logs a `note.created` event for `note:<id>`. `CONF:app`, `CONF:events`
+- **APP-4:** The worker handles `note_email`: it emails the person (when sign-in gave an email) with the key `note-<id>/created`, then logs `note.emailed` for `note:<id>`. `CONF:mail`, `CONF:events`
+- **APP-5:** The manifest's checks include the flow and invariant below, or stricter ones:
+  ```toml
+  [[check.smoke]]
+  name  = "one note per title, even when racing"
+  steps = [
+    "SIGN IN racer-{run}@example.test",
+    "POST /api/notes {title: 'Hello {run}'} -> 201|409 x10",
+    "GET /api/notes -> 200",
+  ]
+  [[check.invariant]]
+  name = "a title once per person"
+  sql  = "SELECT user_id, title FROM notes GROUP BY user_id, title HAVING count(*) > 1"
+  ```
+  `LINT:checks`, `CONF:smoke`
+
+## 12. The conformance descriptor
+
+Auto-reload (DEV-2 to DEV-4) can only be proven by editing a real file, so each starter says which, in `conformance.toml` at its root. `agc init` doesn't copy this file.
+
+```toml
+[reload.api]     # edit `file`, replacing `find` with `replace`; within 5 s, GET `url` contains `expect`
+file = "server/health.ts"
+find = "status: 'ok'"
+replace = "status: 'reloaded'"
+url = "/api/health"
+expect = "reloaded"
+
+[reload.ui]      # the same, for a UI module the dev server serves
+file = "web/src/App.tsx"
+find = "Your notes"
+replace = "Your reloaded notes"
+url = "/src/App.tsx"
+expect = "Your reloaded notes"
+
+[dev]            # run once in a fresh copy before `dev` (DEV-5): the one install command the README gives
+setup = "npm ci"
+
+[reload.worker]  # the same, but `expect` must appear in the worker's log
+file = "server/worker.ts"
+find = "worker ready"
+replace = "worker reloaded"
+expect = "worker reloaded"
+```
+
+- **DSC-1:** `conformance.toml` has `[dev] setup` and all three reload probes, and each `find` occurs exactly once in its `file`, so every probe edits one exact spot. `LINT:descriptor`
 
 ## Out of scope for v1
 

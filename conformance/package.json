@@ -1,0 +1,21 @@
+{
+  "name": "@agentdotcloud/starters-conformance",
+  "private": true,
+  "type": "module",
+  "description": "Checks that an agent.cloud starter follows SPEC.md: a linter and a black-box suite against a fake platform",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "conform": "node run.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.9.2"
+  }
+}
