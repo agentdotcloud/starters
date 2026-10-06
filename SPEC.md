@@ -134,6 +134,7 @@ Every starter is the same small app, so the shared UI works with every stack and
   sql  = "SELECT user_id, title FROM notes GROUP BY user_id, title HAVING count(*) > 1"
   ```
   `LINT:checks`, `CONF:smoke`
+- **APP-6:** A `seed.sql`, declared as `[data.db] seed = "seed.sql"`, inserts one demo person (a fixed uuid, `demo@example.test`, "Demo Person") and three notes for them, every insert `ON CONFLICT DO NOTHING`, touching only tables the migrations create and no DDL, in under 200 lines. agc runs it once on a mirror that starts empty, after the migrations (agent.cloud's `docs/specs/seed-data.md`); it never runs in production. `LINT:seed`, `CONF:seed` (after the migrations, the seed applies on the fake database; signed in as the demo person's id, `GET /api/notes` answers exactly those three notes; applying it a second time changes nothing)
 
 ## 12. The conformance descriptor
 
