@@ -83,11 +83,16 @@ def work(job: dict[str, Any]) -> None:
             conn.execute("UPDATE jobs SET done_at = now(), locked_until = NULL, last_error = NULL WHERE id = %s", (job["id"],))
     except Exception as e:  # noqa: BLE001 - kept on the job and retried, backing off
         delay = min(2 ** job["attempts"], 3600)
-        with connect() as conn:
-            conn.execute(
-                "UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => %s), last_error = %s WHERE id = %s",
-                (delay, str(e)[:500], job["id"]),
-            )
+        try:
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => %s), last_error = %s WHERE id = %s",
+                    (delay, str(e)[:500], job["id"]),
+                )
+        except psycopg.Error as db:
+            # The database is gone too: the job's lease runs out and it's claimed again, so nothing is lost.
+            log.warn("couldn't record a failed job", job=job["id"], error=str(db))
+            return
         log.warn("job failed", job=job["id"], kind=job["kind"], attempts=job["attempts"], retry_in_s=delay)
 
 

@@ -5,5 +5,10 @@ set -e
 export API_PORT=$((PORT + 1))
 uv run python -m app --reload --port "$API_PORT" &
 api=$!
-trap 'kill $api 2>/dev/null' EXIT INT TERM
-npx vite --host 0.0.0.0 --port "$PORT" --strictPort
+npx vite --host 0.0.0.0 --port "$PORT" --strictPort &
+ui=$!
+# Both run in the background, so a TERM to this shell alone stops them at once (a shell defers traps while it waits on
+# a foreground job).
+trap 'kill $api $ui 2>/dev/null' INT TERM
+trap 'kill $api $ui 2>/dev/null' EXIT
+wait

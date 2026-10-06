@@ -21,7 +21,12 @@ export interface User { id: string; email: string | null; name: string | null }
 export type Env = { Variables: { user: User | null } };
 
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+// Byte lengths, not string lengths: timingSafeEqual throws on unequal buffers, and 'é' is one character but two bytes.
+const same = (a: string, b: string) => {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 const cookie = { httpOnly: true, sameSite: 'Lax', secure: !onMirror, path: '/' } as const;
 
 // Who's signed in, for every request: their session cookie, if it's live.

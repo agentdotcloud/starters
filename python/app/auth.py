@@ -66,7 +66,8 @@ def sign_in() -> Response:
 def callback(request: Request, code: str = "", state: str = "") -> Response:
     # State first: it's what stops someone else's code from signing this person in to the wrong account.
     expected = request.cookies.get(STATE, "")
-    if not expected or not secrets.compare_digest(state, expected):
+    # Bytes, not str: compare_digest refuses non-ASCII strings, and a crafted state would otherwise be a 500.
+    if not expected or not secrets.compare_digest(state.encode(), expected.encode()):
         response: Response = PlainTextResponse("Sign-in expired. Try again.", status_code=400)
         response.delete_cookie(STATE, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
         return response
