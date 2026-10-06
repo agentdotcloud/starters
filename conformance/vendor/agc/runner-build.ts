@@ -1,6 +1,7 @@
 // Builds a release image: snapshot → Cloud Storage → Cloud Build (as the builder service account) → Artifact Registry.
 // GCP credentials are the node's own, from the metadata server; they never leave GCP.
 import { gunzipSync, gzipSync } from 'node:zlib';
+import { stackOf } from './stack.ts';
 
 // Files arrive with the modes they had on the agent's machine, and some agents' sandboxes make them owner-only (0600,
 // 0660): the user the image runs as (node) then can't read the app's own package.json, and it crashes before starting.
@@ -30,6 +31,26 @@ export function portableModes(tgz: Uint8Array, limit = 500 * 1024 * 1024): Uint8
     off += 512 + Math.ceil(size / 512) * 512;
   }
   return gzipSync(tar);
+}
+
+// The source's root files that decide how it builds (docs/specs/python-apps.md PYB-1), read straight from the tarball.
+export function sourceShape(tgz: Uint8Array, limit = 500 * 1024 * 1024): { has: Set<string>; pyproject: string | null } {
+  const tar = Buffer.from(gunzipSync(tgz, { maxOutputLength: limit }));
+  const has = new Set<string>();
+  let pyproject: string | null = null;
+  for (let off = 0; off + 512 <= tar.length; ) {
+    const h = tar.subarray(off, off + 512);
+    if (h.every((b) => b === 0)) break;
+    const field = (a: number, b: number) => h.subarray(a, b).toString('utf8').replace(/\0[\s\S]*$/, '');
+    const size = h[124]! & 0x80 ? Number(h.readBigUInt64BE(128)) : parseInt(field(124, 136).trim() || '0', 8);
+    const name = field(0, 100).replace(/^\.\//, '');
+    if ((h[156] === 0 || h[156] === 0x30) && !name.includes('/')) {
+      has.add(name);
+      if (name === 'pyproject.toml' && size < 1_000_000) pyproject = tar.subarray(off + 512, off + 512 + size).toString('utf8');
+    }
+    off += 512 + Math.ceil(size / 512) * 512;
+  }
+  return { has, pyproject };
 }
 
 export interface BuildConfig {
@@ -112,6 +133,42 @@ export function forwarding(command: string): string[] {
   return ['sh', '-c', `(\n${command}\n) & c=$!; trap 'kill -TERM $c 2>/dev/null' TERM INT; wait $c; trap - TERM INT; wait $c`];
 }
 
+export const UV_IMAGE = 'ghcr.io/astral-sh/uv:0.12.19';
+
+// PYB-2: the image a uv project gets when it brings no Dockerfile. A UI (package.json) builds in a Node stage, and only
+// its web/dist is kept. Python's dependencies install frozen from uv.lock into /app/.venv (on PATH), compiled to bytecode
+// at build, since nothing writes the app's folder at run time. Logs are unbuffered, so each line reaches observability
+// when it's written. libpq trusts the system CAs for verify-full (ENV-1; libpq 16+, as psycopg 3's wheels bundle). The
+// manifest's command runs under the same signal wrapper as Node's.
+export function pythonDockerfile(command: string, ui: boolean): string {
+  return [
+    ...(ui ? [
+      'FROM node:24-slim AS ui',
+      'WORKDIR /app',
+      'ENV NPM_CONFIG_UPDATE_NOTIFIER=false',
+      'COPY package*.json ./',
+      'RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi',
+      'COPY . .',
+      'RUN npm run build --if-present && mkdir -p web/dist',
+      '',
+    ] : []),
+    'FROM python:3.12-slim',
+    `COPY --from=${UV_IMAGE} /uv /uvx /bin/`,
+    'WORKDIR /app',
+    // HOME=/tmp: the data stack caches under ~ (DuckDB extensions, matplotlib), and /tmp is the one place an app writes.
+    'ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1 PGSSLROOTCERT=system HOME=/tmp PATH=/app/.venv/bin:$PATH',
+    'COPY pyproject.toml uv.lock ./',
+    'RUN uv sync --frozen --no-dev --no-install-project',
+    'COPY . .',
+    'RUN uv sync --frozen --no-dev',
+    ...(ui ? ['COPY --from=ui /app/web/dist ./web/dist'] : []),
+    'RUN useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin app',
+    'USER app',
+    `CMD ${JSON.stringify(forwarding(command))}`,
+    '',
+  ].join('\n');
+}
+
 export function defaultDockerfile(command: string | null): string {
   const cmd = command ? JSON.stringify(forwarding(command)) : '["/usr/local/bin/agc-start"]';
   return [
@@ -136,7 +193,11 @@ export async function build(cfg: BuildConfig, app: string, op: string, tarball: 
   const object = `agc-sources/${app}/${op}.tgz`;
   await gcp('POST', `https://storage.googleapis.com/upload/storage/v1/b/${cfg.bucket}/o?uploadType=media&name=${encodeURIComponent(object)}`, undefined, portableModes(tarball));
   const repo = `${cfg.region}-docker.pkg.dev/${cfg.project}/${cfg.repository}/app-${app}`;
-  const dockerfile = Buffer.from(defaultDockerfile(command)).toString('base64');
+  // An app's own Dockerfile wins; a uv project gets Python's default; anything else, Node's (PYB-1).
+  const shape = sourceShape(tarball);
+  const stack = stackOf((n) => shape.has.has(n), shape.pyproject);
+  if (stack === 'python' && !command) throw new Error('a Python app needs [service.web] command in agentcloud.toml'); // control refuses this before building
+  const dockerfile = Buffer.from(stack === 'python' ? pythonDockerfile(command!, shape.has.has('package.json')) : defaultDockerfile(command)).toString('base64');
   const api = `https://cloudbuild.googleapis.com/v1/projects/${cfg.project}/locations/${cfg.region}/builds`;
   const created = await gcp<{ metadata: { build: { id: string } } }>('POST', api, {
     source: { storageSource: { bucket: cfg.bucket, object } },

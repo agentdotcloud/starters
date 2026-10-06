@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse } from 'smol-toml';
 import { appConfig, type AppConfig } from '../vendor/agc/config.ts';
+import { stackOf } from '../vendor/agc/stack.ts';
 import { run } from './sh.ts';
 
 export type Language = 'node' | 'python';
@@ -21,15 +22,12 @@ export interface Stack {
 
 const table = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 
-// A uv project (a pyproject.toml whose [project] declares dependencies) is Python; otherwise package.json is Node.
-// The same order as agent-cloud's PYB-1.
+// How agent.cloud decides (PYB-1), with its own code: a uv project is Python; otherwise package.json is Node.
 export function languageOf(dir: string): Language | null {
   const py = join(dir, 'pyproject.toml');
-  if (existsSync(py)) {
-    const project = table(table(parse(readFileSync(py, 'utf8'))).project);
-    if (Array.isArray(project.dependencies) && project.dependencies.length) return 'python';
-  }
-  return existsSync(join(dir, 'package.json')) ? 'node' : null;
+  const stack = stackOf((n) => existsSync(join(dir, n)), existsSync(py) ? readFileSync(py, 'utf8') : null);
+  if (stack === 'python') return 'python';
+  return existsSync(join(dir, 'package.json')) ? 'node' : null; // a Dockerfile is LINT:no-dockerfile's business
 }
 
 export async function shippedFiles(dir: string): Promise<string[]> {

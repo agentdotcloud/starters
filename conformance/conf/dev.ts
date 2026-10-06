@@ -5,6 +5,7 @@ import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, type TestResult } from '../lib/report.ts';
+import { UV_IMAGE } from '../vendor/agc/runner-build.ts';
 import { must, run, sleep, until } from '../lib/sh.ts';
 import type { Reload } from '../lib/stack.ts';
 import { cookieAttrs, type Jar, req, signIn } from './http.ts';
@@ -14,7 +15,7 @@ const BUDGET_MS = 5000;
 // Python's dev image carries Node too: the starter's UI runs under Vite next to uvicorn.
 const PYTHON_DEV = [
   'FROM python:3.12-slim',
-  'COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /usr/local/bin/uv',
+  `COPY --from=${UV_IMAGE} /uv /usr/local/bin/uv`,
   'COPY --from=node:24-slim /usr/local/bin/node /usr/local/bin/node',
   'COPY --from=node:24-slim /usr/local/lib/node_modules /usr/local/lib/node_modules',
   'RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx',

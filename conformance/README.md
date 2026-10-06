@@ -27,4 +27,4 @@ Needs Node 24, Docker, and `openssl`. Exits 1 if any MUST rule fails. `CONFORMAN
 
 ## Vendored from agent.cloud
 
-`vendor/agc/` holds agent-cloud's own code at the commit in `vendor/agc/COMMIT`. It's the checks engine, the migration reader, the manifest parser, the runner's default Dockerfile and the secret scan. So the suite enforces what the platform enforces. Refresh it with `vendor/sync.sh <agent-cloud checkout>`, then run the suite for every stack.
+`vendor/agc/` holds agent-cloud's own code at the commit in `vendor/agc/COMMIT`. It's the checks engine, the migration reader, the manifest parser, how a stack is recognised, the runner's default Dockerfiles for Node and Python, and the secret scan. So the suite enforces what the platform enforces. Refresh it with `vendor/sync.sh <agent-cloud checkout>`, then run the suite for every stack.
