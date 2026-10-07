@@ -1,5 +1,5 @@
 {
-  "name": "@agentdotcloud/starters-conformance",
+  "name": "@summationai/agc-starters-conformance",
   "private": true,
   "type": "module",
   "description": "Checks that an agent.cloud starter follows SPEC.md: a linter and a black-box suite against a fake platform",
