@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
@@ -32,13 +33,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+def _ours(request: Request) -> bool:
+    """SEC-6: a change comes from this app's own pages. A browser says where a request came from (Origin, or
+    Sec-Fetch-Site when it sends no Origin), and agent.cloud isn't a public suffix, so a sibling app's page is
+    "same-site" and its requests carry this app's cookies. Anything from another origin is refused; a request with
+    neither header (an agent, curl, a server) isn't a browser and passes on to the session check."""
+    origin = request.headers.get("origin")
+    if origin:
+        parsed = urlsplit(origin)
+        return bool(parsed.scheme and parsed.netloc) and parsed.netloc == request.headers.get("host", "")
+    site = request.headers.get("sec-fetch-site")
+    return site in (None, "same-origin", "none")
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     # Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here
     # with this app's cookies; a JSON body would need a CORS preflight, which this app never grants.
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not request.headers.get("content-type", "").startswith("application/json"):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not _ours(request):
+        response: Response = JSONResponse(
+            {"error": {"code": "cross_origin", "message": "Changes come from this app\u2019s own pages."}}, 403
+        )
+    elif request.method not in ("GET", "HEAD", "OPTIONS") and not request.headers.get("content-type", "").startswith("application/json"):
         refusal = {"code": "json_required", "message": "Send a JSON body (Content-Type: application/json)."}
-        response: Response = JSONResponse({"error": refusal}, 415)
+        response = JSONResponse({"error": refusal}, 415)
     else:
         try:
             response = await call_next(request)
