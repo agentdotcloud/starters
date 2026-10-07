@@ -29,8 +29,30 @@ const same = (a: string, b: string) => {
 };
 const cookie = { httpOnly: true, sameSite: 'Lax', secure: !onMirror, path: '/' } as const;
 
+// AUTH-5: on a target with its own sign-in ([auth] provider = "edge"), the target's gate signs people in before a request
+// reaches this app and says who it is in two headers; the app trusts them (its pods are reachable only through the gate)
+// and keeps no session of its own. A user's id is fixed by their email. AGC_EDGE_DEV_USER stands in on mirrors and in
+// rehearsals, where no gate runs; production never has it.
+const EDGE = process.env.AGC_AUTH_PROVIDER === 'edge';
+const DEV_USER = process.env.AGC_EDGE_DEV_USER ?? '';
+const idOf = (email: string) => { const h = createHash('sha256').update(`agc-edge:${email}`).digest('hex'); return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`; };
+async function edgeUser(c: Context<Env>): Promise<User | null> {
+  const email = (c.req.header('x-agc-user-email') ?? DEV_USER).trim().toLowerCase();
+  if (!email) return null;
+  const name = (c.req.header('x-agc-user-name') ?? '').trim() || null;
+  const id = idOf(email);
+  await pool.query(
+    `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()`, [id, email, name]);
+  return { id, email, name };
+}
+
 // Who's signed in, for every request: their session cookie, if it's live.
 export const session: MiddlewareHandler<Env> = async (c, next) => {
+  if (EDGE) {
+    c.set('user', await edgeUser(c));
+    return next();
+  }
   const token = getCookie(c, SESSION);
   c.set('user', null);
   if (token) {
@@ -43,6 +65,7 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
 
 export function signIn(app: Hono<Env>) {
   app.get('/auth/sign-in', (c) => {
+    if (EDGE) return c.redirect('/'); // AUTH-5: the target's gate already signed them in
     const state = randomBytes(24).toString('base64url');
     setCookie(c, STATE, state, { ...cookie, maxAge: 600 });
     return c.redirect(`${AGC_AUTH_URL}/authorize?state=${state}`);
@@ -76,6 +99,7 @@ export function signIn(app: Hono<Env>) {
   });
 
   app.post('/auth/sign-out', async (c: Context<Env>) => {
+    if (EDGE) return c.json({ ok: true }); // AUTH-5: signing out is the target's sign-in's, not this app's
     const token = getCookie(c, SESSION);
     if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
     deleteCookie(c, SESSION, { path: '/', secure: !onMirror });

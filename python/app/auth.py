@@ -5,6 +5,7 @@
 Sessions are rows in the database (only a hash of the token is stored) and last a day."""
 
 import hashlib
+import os
 import secrets
 from typing import Any
 
@@ -35,7 +36,37 @@ def _cookie(response: Response, name: str, value: str, max_age: int) -> None:
     response.set_cookie(name, value, max_age=max_age, httponly=True, samesite="lax", secure=not ON_MIRROR, path="/")
 
 
+# AUTH-5: on a target with its own sign-in ([auth] provider = "edge"), the target's gate signs people in before a request
+# reaches this app and says who it is in two headers; the app trusts them (its pods are reachable only through the gate)
+# and keeps no session of its own. A user's id is fixed by their email. AGC_EDGE_DEV_USER stands in on mirrors and in
+# rehearsals, where no gate runs; production never has it.
+EDGE = os.environ.get("AGC_AUTH_PROVIDER") == "edge"
+DEV_USER = os.environ.get("AGC_EDGE_DEV_USER", "")
+
+
+def _id_of(email: str) -> str:
+    h = hashlib.sha256(f"agc-edge:{email}".encode()).hexdigest()
+    return f"{h[0:8]}-{h[8:12]}-5{h[13:16]}-8{h[17:20]}-{h[20:32]}"
+
+
+def _edge_user(request: Request) -> dict[str, Any] | None:
+    email = (request.headers.get("x-agc-user-email") or DEV_USER).strip().lower()
+    if not email:
+        return None
+    name = (request.headers.get("x-agc-user-name") or "").strip() or None
+    user_id = _id_of(email)
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO users (id, email, name) VALUES (%s, %s, %s)"
+            " ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()",
+            (user_id, email, name),
+        )
+    return {"id": user_id, "email": email, "name": name}
+
+
 def current_user(request: Request) -> dict[str, Any] | None:
+    if EDGE:
+        return _edge_user(request)
     token = request.cookies.get(SESSION)
     if not token:
         return None
@@ -56,6 +87,8 @@ def signed_in(request: Request) -> dict[str, Any]:
 
 @router.get("/auth/sign-in")
 def sign_in() -> Response:
+    if EDGE:
+        return RedirectResponse("/", status_code=302)  # AUTH-5: the target's gate already signed them in
     state = secrets.token_urlsafe(24)
     response = RedirectResponse(f"{AUTH_URL}/authorize?state={state}", status_code=302)
     _cookie(response, STATE, state, 600)
@@ -96,6 +129,8 @@ def callback(request: Request, code: str = "", state: str = "") -> Response:
 
 @router.post("/auth/sign-out")
 def sign_out(request: Request) -> Response:
+    if EDGE:
+        return JSONResponse({"ok": True})  # AUTH-5: signing out is the target's sign-in's, not this app's
     token = request.cookies.get(SESSION)
     if token:
         with pool.connection() as conn:
