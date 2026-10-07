@@ -21,7 +21,7 @@ export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
-  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:headers', 'CONF:app', 'CONF:seed',
+  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:headers', 'CONF:app', 'CONF:seed',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -230,6 +230,21 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const after = await req(env, web, jar, 'GET', '/api/notes');
       const madeIt = Array.isArray(after.json) && (after.json as { title?: string }[]).some((n) => n.title === title);
       set('CONF:csrf-json', (form.status === 415 && !madeIt ? pass : fail)(`a form post answered ${form.status}${madeIt ? ' and created a note' : ', nothing created'}`));
+
+      // SEC-6: a sibling app's page can't change anything, even with a JSON body and this app's cookies.
+      const own = new URL(env.base(web)).origin;
+      const tried = async (headers: Record<string, string>) => {
+        const t = `Origin ${tag()}`;
+        const r = await req(env, web, jar, 'POST', '/api/notes', { title: t }, headers);
+        const listed = await req(env, web, jar, 'GET', '/api/notes');
+        return { status: r.status, code: (r.json as { error?: { code?: string } } | null)?.error?.code, made: Array.isArray(listed.json) && (listed.json as { title?: string }[]).some((n) => n.title === t), id: (r.json as { id?: string } | null)?.id };
+      };
+      const sibling = await tried({ origin: 'https://other-app.agent.cloud' });
+      const marked = await tried({ 'sec-fetch-site': 'same-site' });
+      const ours = await tried({ origin: own, 'sec-fetch-site': 'same-origin' });
+      if (ours.id) created.push(ours.id);
+      const ok = sibling.status === 403 && sibling.code === 'cross_origin' && !sibling.made && marked.status === 403 && !marked.made && ours.status === 201;
+      set('CONF:csrf-origin', (ok ? pass : fail)(`another origin ${sibling.status}${sibling.made ? ' and created a note' : ''}; same-site with no Origin ${marked.status}${marked.made ? ' and created a note' : ''}; its own origin ${ours.status}`));
     }
 
     // APP-6: the demo person sees exactly the seeded notes, and the seed is idempotent.

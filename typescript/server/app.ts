@@ -24,6 +24,24 @@ app.use(async (c, next) => {
   await next();
 });
 
+// SEC-6: a change comes from this app's own pages. A browser says where a request came from (Origin, or Sec-Fetch-Site
+// when it sends no Origin), and agent.cloud isn't a public suffix, so a sibling app's page is "same-site" and its
+// requests carry this app's cookies. Anything from another origin is refused; a request with neither header (an agent,
+// curl, a server) isn't a browser and passes on to the session check.
+app.use(async (c, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) return next();
+  const origin = c.req.header('origin');
+  const site = c.req.header('sec-fetch-site');
+  let ours: boolean;
+  if (origin) {
+    try { ours = new URL(origin).host === c.req.header('host'); } catch { ours = false; } // "null" and garbage are not ours
+  } else {
+    ours = !site || site === 'same-origin' || site === 'none';
+  }
+  if (!ours) return c.json({ error: { code: 'cross_origin', message: 'Changes come from this app\u2019s own pages.' } }, 403);
+  await next();
+});
+
 // Health answers as soon as the server can serve, without touching the database: agent.cloud asks every 2 seconds.
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
 
